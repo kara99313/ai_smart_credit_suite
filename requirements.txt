@@ -1,0 +1,114 @@
+# =========================================================
+#  CORE APPLICATIONS
+# =========================================================
+streamlit==1.50.0
+fastapi==0.119.0
+uvicorn[standard]==0.37.0
+pydantic==2.12.2
+python-dotenv==1.1.1
+requests==2.32.3
+beautifulsoup4==4.14.2
+email-validator==2.3.0
+
+# =========================================================
+#  DATA / MACHINE LEARNING / STATISTICS
+#  (Compatible Python 3.12 + scikit-learn 1.6)
+# =========================================================
+numpy==1.26.4
+pandas==2.3.3
+scikit-learn==1.6.1
+scipy==1.13.1
+joblib==1.5.2
+
+# SHAP & optimisation (évite crash NumPy 2)
+numba==0.62.1
+llvmlite==0.45.1
+shap==0.49.1
+
+# Gradient boosting
+xgboost==3.0.5
+lightgbm==4.6.0
+catboost==1.2.8
+
+# =========================================================
+#  VISUALISATION & REPORTING
+# =========================================================
+plotly==6.3.1
+matplotlib==3.10.0
+seaborn==0.13.2
+kaleido==1.1.0
+reportlab==4.4.4
+Pillow==10.4.0   # ← requis stable pour ReportLab/Matplotlib (images/PNG)
+
+# =========================================================
+#  LLM / RAG / AGENTS
+# =========================================================
+# PyTorch (Windows)
+torch==2.2.2 ; platform_system == "Windows"
+torchvision==0.17.2 ; platform_system == "Windows"
+
+# Transformers et accélération
+transformers==4.41.1
+tokenizers==0.19.1
+safetensors==0.4.3
+accelerate==0.28.0
+
+# Embeddings & Vector stores
+sentence-transformers==3.0.1
+faiss-cpu==1.12.0
+chromadb==1.1.1
+
+# LangChain (versions compatibles)
+langchain==0.3.27
+langchain-core==0.3.78
+langchain-community==0.3.31
+langchain-openai==0.3.35
+langchain-ollama==0.3.10
+langchain-huggingface==0.3.1
+langchain-groq==0.3.8
+groq==0.32.0
+langchain-text-splitters==0.3.11
+
+# =========================================================
+#  FILES / RAG DOCS
+# =========================================================
+docx2txt==0.9
+pypdf==6.1.1
+python-docx==1.2.0
+python-multipart==0.0.20
+
+# =========================================================
+#  DATA QUALITY
+# =========================================================
+great-expectations==1.7.1
+
+# =========================================================
+#  DATABASE / REGISTRY / AUDIT
+# =========================================================
+SQLAlchemy==2.0.44
+psycopg[binary]==3.2.10
+alembic==1.17.0
+
+# =========================================================
+#  OBSERVABILITY & MONITORING (SRE)
+# =========================================================
+prometheus-client==0.23.1
+opentelemetry-sdk==1.38.0
+opentelemetry-instrumentation-fastapi==0.59b0
+opentelemetry-instrumentation-requests==0.59b0
+opentelemetry-instrumentation-sqlalchemy==0.59b0
+opentelemetry-exporter-otlp==1.38.0
+
+# =========================================================
+#  SECURITY / RATE LIMITING
+# =========================================================
+slowapi==0.1.9
+
+# =========================================================
+#  UTILITIES
+# =========================================================
+python-dateutil==2.9.0.post0
+tqdm==4.67.1
+PyYAML==6.0.3
+langdetect==1.0.9
+duckduckgo-search==6.3.0

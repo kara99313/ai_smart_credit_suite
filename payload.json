@@ -1,0 +1,18 @@
+{
+  "DTIRatio": 0.35,
+  "TrustScorePsychometric": 0.62,
+  "HouseholdSize": 4,
+  "NumCreditLines": 2,
+  "Income": 300000,
+  "CommunityGroupMember": true,
+  "HasMortgage": false,
+  "MonthsEmployed": 36,
+  "HasSocialAid": false,
+  "MobileMoneyTransactions": 120,
+  "Age": 32,
+  "InterestRate": 12.0,
+  "LoanTerm": 24,
+  "LoanAmount": 800000,
+  "InformalIncome": 50000,
+  "threshold": 0.10
+}

@@ -1,0 +1,4 @@
+[server]
+fileWatcherType = "poll"
+# Si tu veux désactiver complètement: "none"
+# fileWatcherType = "none"

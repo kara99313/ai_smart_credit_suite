@@ -1,0 +1,46 @@
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    container_name: ai_web
+    command: >
+      bash -lc "streamlit run streamlit_app.py
+                --server.port=8501
+                --server.address=0.0.0.0"
+    ports:
+      - "8501:8501"
+    env_file:
+      - ../.env
+    volumes:
+      - ..:/app
+      - app_data:/app/data
+      - app_reports:/app/reports
+      - app_vector:/app/vector_store
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    container_name: ai_api
+    command: >
+      bash -lc "uvicorn server:app
+                --host 0.0.0.0 --port 8000 --workers 2"
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    volumes:
+      - ..:/app
+      - app_data:/app/data
+      - app_reports:/app/reports
+      - app_vector:/app/vector_store
+    restart: unless-stopped
+
+volumes:
+  app_data:
+  app_reports:
+  app_vector:

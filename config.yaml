@@ -1,0 +1,68 @@
+# ======================================
+# AI Smart Credit Suite — config.yaml
+# ======================================
+
+app:
+  name: "AI Smart Credit Suite"
+  language_default: "fr"           # fr | en | bi
+  theme: "auto"                    # auto | light | dark
+  brand: "AI Smart Credit"
+  env: "local"
+  timezone: "Africa/Abidjan"
+
+paths:
+  data_dir: "data"
+  reports_dir: "reports"
+  vector_store_dir: "vector_store"
+  docs_dir: "docs_rag"
+  assets_dir: "assets"
+  model_path: "model/logistic_pipeline_best.pkl"
+
+prediction:
+  decision_threshold: 0.10
+  rating_scale: "standard"
+
+llm:
+  provider: "groq"                  # groq | openai | ollama
+  groq_model: "llama-3.1-8b-instant"
+  openai_model: "gpt-4o-mini"
+  ollama_model: "llama3.2:3b"
+  temperature: 0.2
+  max_tokens: 768
+  timeout: 60
+
+rag:
+  index_kind: "faiss"               # faiss | chroma
+  top_k_docs: 3
+  hybrid_default: false
+  truncate_each_passage_chars: 1000
+
+web:
+  enable_search: false
+  max_results: 2
+  fetch_full: false
+  allowed_domains: []
+
+agent:
+  max_iterations: 4
+  history_pairs_limit: 6
+  use_tools: ["predict_credit", "rag_retrieve", "search_web", "build_report", "now"]
+
+ui:
+  web_port: 8501
+  show_llm_badge: true
+  show_debug_context: true
+
+report:
+  author: "Credit Risk Analytics"
+  primary_color: "#0F766E"
+  footer_text: "Sous réserve des politiques internes de risque & conformité."
+  logo_path: "assets/logo.png"
+
+observability:
+  enable_usage_metrics: true
+  kpi_window_days: 30
+
+rate_limits:
+  groq_tpm_guard: true
+  web_sleep_ms: 200
