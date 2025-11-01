@@ -1,42 +1,98 @@
-# --- Python / venv / cache
+# =========================================================
+#  AI SMART CREDIT SUITE — .gitignore
+#  (Empêche la fuite de données sensibles et fichiers inutiles)
+# =========================================================
+
+# --- ENVIRONNEMENT & CLÉS ---
+.env
+!.env.example       # ← autorise la version publique .env.example
+.env.local
+.env.*.backup
+*.key
+*.pem
+
+# --- FICHIERS TEMPORAIRES / CACHE ---
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.egg-info/
-.venv/
-venv/
-.env
-.env.*
+*.pkl
+*.joblib
+*.log
+*.tmp
+*.bak
 
-# --- OS / IDE
-.DS_Store
-Thumbs.db
+# --- VENV / DEPENDANCES LOCALES ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- CONFIGURATION IDE / ÉDITEURS ---
 .vscode/
 .idea/
+.spyderproject
+.spyproject
+*.sublime-project
+*.sublime-workspace
 
-# --- Data & sorties locales
-data/
-reports/
-vector_store/
-docs_rag/**/cache*/
-logs/
-*.log
+# --- OS SYSTEM FILES ---
+.DS_Store
+Thumbs.db
+desktop.ini
 
-# --- Modèles/artefacts volumineux
+# --- ARCHIVES / SAUVEGARDES ---
+*.zip
+*.tar
+*.gz
+*.rar
+
+# --- RAPPORTS / EXPORTS / DATA ---
+data/*.csv
+data/*.xlsx
+data/*.json
+data/*.parquet
+data/*.sav
+reports/*.pdf
+reports/*.html
+reports/*.docx
+reports/*.txt
+
+# --- MODELES & CHECKPOINTS ML ---
 model/*.pkl
 model/*.joblib
-*.onnx
-*.pt
-*.bin
+model/*.h5
+model/*.onnx
+model/*.pt
+model/*.bin
 
-# --- Streamlit
-.streamlit/**/credentials.toml
-.streamlit/**/secrets.toml
+# --- LOGS / MONITORING ---
+logs/
+*.log
+*.out
+*.err
 
-# --- Notebooks checkpoints
-.ipynb_checkpoints/
+# --- NAVIGATION & RAG CACHE ---
+vector_store/
+docs_rag/index/
+*.faiss
+*.npy
+*.npz
 
-# --- Build / dist
-dist/
+# --- DOCKER / BUILD ---
+Dockerfile
+docker-compose.yml
+.dockerignore
 build/
+dist/
+
+# --- NOTEBOOKS / TEMP FILES ---
+*.ipynb_checkpoints/
+*.nbconvert/
+*.sqlite
+*.db
+
+# --- AUTRES TEMP FILES ---
+tmp/
+temp/
+.cache/
