@@ -1,0 +1,17 @@
+[
+  "DTIRatio",
+  "TrustScorePsychometric",
+  "HouseholdSize",
+  "NumCreditLines",
+  "Income",
+  "MonthsEmployed",
+  "MobileMoneyTransactions",
+  "Age",
+  "InterestRate",
+  "LoanTerm",
+  "LoanAmount",
+  "InformalIncome",
+  "HasMortgage_Yes",
+  "HasSocialAid_Yes",
+  "CommunityGroupMember_Yes"
+]
