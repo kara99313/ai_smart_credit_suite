@@ -16,8 +16,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.pkl
-*.joblib
 *.log
 *.tmp
 *.bak
@@ -59,16 +57,19 @@ reports/*.docx
 reports/*.txt
 
 # --- MODELES & CHECKPOINTS ML ---
-model/*.pkl
+# On ignore les modèles volumineux et temporaires, 
+# mais on autorise explicitement le logistic_pipeline_best.pkl
 model/*.joblib
 model/*.h5
 model/*.onnx
 model/*.pt
 model/*.bin
+!model/logistic_pipeline_best.pkl       # ← autorisé (modèle principal)
+!model/features.pkl                     # ← autorisé si utilisé
+!model/explainer.pkl                    # ← autorisé si utilisé
 
 # --- LOGS / MONITORING ---
 logs/
-*.log
 *.out
 *.err
 
