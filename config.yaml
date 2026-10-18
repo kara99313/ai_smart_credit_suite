@@ -10,6 +10,11 @@ app:
   env: "local"
   timezone: "Africa/Abidjan"
 
+# Defaults overridden by process variables and .env.
+backend:
+  host: "127.0.0.1"
+  port: 18000
+
 paths:
   data_dir: "data"
   reports_dir: "reports"
@@ -24,7 +29,7 @@ prediction:
 
 llm:
   provider: "groq"                  # groq | openai | ollama
-  groq_model: "llama-3.1-8b-instant"
+  groq_model: "openai/gpt-oss-20b"
   openai_model: "gpt-4o-mini"
   ollama_model: "llama3.2:3b"
   temperature: 0.2

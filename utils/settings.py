@@ -4,13 +4,15 @@ import os, json
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, Mapping
+from utils.runtime_config import ROOT
+from utils.llm_runtime import get_setting
 
 import yaml  # PyYAML est déjà dans requirements
 
 # ============================
 # Dossiers et fichiers
 # ============================
-ROOT_DIR = Path(os.getcwd())
+ROOT_DIR = ROOT
 DATA_DIR = ROOT_DIR / "data"
 SETTINGS_PATH = DATA_DIR / "app_settings.json"
 CONFIG_PATH = ROOT_DIR / "config.yaml"
@@ -22,11 +24,7 @@ def _get_secret(key: str, default: str = "") -> str:
     """
     Lecture sécurisée : st.secrets (Streamlit Cloud) ou os.getenv (local).
     """
-    try:
-        import streamlit as st
-        return st.secrets.get(key, default)
-    except Exception:
-        return os.getenv(key, default)
+    return get_setting(key, default)
 
 # ============================
 # Défauts (côté code)
@@ -54,7 +52,7 @@ class AppSettings:
         _get_secret("GROQ_MODEL", "")
         or _get_secret("OPENAI_MODEL", "")
         or _get_secret("OLLAMA_MODEL", "")
-        or "llama-3.1-8b-instant"
+        or "openai/gpt-oss-20b"
     )
     llm_temperature: float = 0.2
     llm_max_tokens: int = 768
@@ -139,6 +137,11 @@ def _load_config_yaml() -> dict:
         if "max_tokens" in llm: flat["llm_max_tokens"] = int(llm["max_tokens"])
         if "timeout" in llm: flat["llm_timeout"] = int(llm["timeout"])
 
+        web = data.get("web", {})
+        if "enable_search" in web: flat["enable_web_search"] = web["enable_search"]
+        if "max_results" in web: flat["web_search_max"] = web["max_results"]
+        if "allowed_domains" in web: flat["allowed_domains"] = web["allowed_domains"]
+
         # rag
         rag = data.get("rag", {})
         flat["rag_vector_store"] = rag.get("vector_store", "faiss")
@@ -192,6 +195,22 @@ def get_settings() -> AppSettings:
     file_obj = _load_app_settings_json()   # 3
     if isinstance(file_obj, dict):
         base = _deep_update(base, file_obj)
+
+    # Ignore unknown legacy fields; API keys must come from secrets/environment.
+    base = {key: value for key, value in base.items() if key in AppSettings.__dataclass_fields__}
+    for field_name, env_name in (("groq_api_key", "GROQ_API_KEY"),
+                                 ("openai_api_key", "OPENAI_API_KEY"),
+                                 ("serpapi_key", "SERPAPI_KEY")):
+        base[field_name] = _get_secret(env_name)
+    from utils.runtime_config import backend_url
+    try:
+        base["api_base_url"] = backend_url()
+    except ValueError:
+        base["api_base_url"] = ""  # Invalid backend must not disable unrelated connectors.
+    provider = _get_secret("LLM_PROVIDER")
+    if provider: base["llm_provider"] = provider
+    model_name = {"groq": "GROQ_MODEL", "openai": "OPENAI_MODEL", "ollama": "OLLAMA_MODEL"}.get(base.get("llm_provider"))
+    if model_name and _get_secret(model_name): base["llm_model"] = _get_secret(model_name)
 
     return AppSettings(**base)
 

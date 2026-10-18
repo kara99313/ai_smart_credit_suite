@@ -1,7 +1,6 @@
 # app/chatbot_assistant.py
 from __future__ import annotations
 import streamlit as st
-from langchain_core.messages import HumanMessage, AIMessage
 from utils.llm_status import llm_status_badge
 
 # i18n léger (fallback)
@@ -59,17 +58,18 @@ def _handle_commands(text: str) -> bool:
         return True
     return False
 
-def _ensure_agent():
-    if st.session_state.agent is None:
+def _ensure_agent(system_prompt):
+    config = (st.session_state.assistant_use_web, system_prompt)
+    if st.session_state.agent is None or st.session_state.get("assistant_agent_config") != config:
         try:
             # Ton create_credit_agent / run_agent_once sont déjà dans utils.agents
             from utils.agents import create_credit_agent
-            st.session_state.agent = create_credit_agent()
+            st.session_state.agent = create_credit_agent(use_web=config[0], system_prompt=system_prompt)
+            st.session_state.assistant_agent_config = config
         except Exception as e:
-            raise RuntimeError(
-                "Impossible de créer l’agent. Vérifie LLM (LLM_PROVIDER=groq + GROQ_API_KEY).\n"
-                f"Détail: {e}"
-            )
+            from utils.llm_runtime import explain
+            raise RuntimeError(explain(e)) from None
+
 
 def main():
     st.markdown("## 🤖 Chatbot Assistant")
@@ -96,26 +96,23 @@ def main():
 
     if st.session_state.assistant_agent:
         try:
-            _ensure_agent()
+            _ensure_agent(system_prompt)
         except Exception as e:
             msg = f"Erreur agent : {e}"
             st.session_state.assistant_msgs.append(("assistant", msg))
             st.chat_message("assistant").markdown(msg)
             return
 
-        chat_history = []
-        for role, msg in st.session_state.assistant_msgs[:-1]:
-            chat_history.append(HumanMessage(msg) if role == "user" else AIMessage(msg))
+        chat_history = st.session_state.assistant_msgs[:-1][-6:]
 
-        # ✅ Limiter l'historique pour Groq free (évite TPM exceeded)
-        if len(chat_history) > 6:
-            chat_history = chat_history[-6:]
-
-        query = user_msg if st.session_state.assistant_use_web else f"[NO_WEB] {user_msg}"
+        query = user_msg
 
         try:
             from utils.agents import run_agent_once
-            out = run_agent_once(st.session_state.agent, query, chat_history)
+            from utils.multitask_agent import as_messages
+            out = run_agent_once(st.session_state.agent, query, as_messages(chat_history))
+            from utils.agents import render_report_downloads
+            render_report_downloads(out)
             answer = out.get("output", "")
             st.session_state.assistant_msgs.append(("assistant", answer))
             st.chat_message("assistant").markdown(answer)
@@ -135,9 +132,18 @@ def main():
     else:
         from utils.llm_providers import load_llm
         web_ctx = ""
+        web_notice = ""
         if st.session_state.assistant_use_web:
-            hits = search_web(user_msg, max_results=2)  # ✅ plus léger
-            web_ctx = build_web_context(hits, max_chars_total=1200, fetch_full=False)
+            try:
+                hits = search_web(user_msg, max_results=2)
+                web_ctx = build_web_context(hits, max_chars_total=1200, fetch_full=False)
+                if not web_ctx:
+                    web_notice = "Recherche Web sans resultat exploitable ou indisponible."
+            except Exception:
+                web_notice = "Recherche Web indisponible."
+            if web_notice:
+                st.warning(web_notice)
+
 
         human = user_msg if not web_ctx else (
             f"Tu peux t'appuyer sur ces résultats Web :\n\n{web_ctx}\n\n"
@@ -145,13 +151,17 @@ def main():
         )
         try:
             llm = load_llm()
-            resp = llm.invoke([
-                {"type": "system", "content": system_prompt},
-                {"type": "human",  "content": human},
-            ])
+            from utils.llm_runtime import invoke, select_provider
+            history = [{"role": role, "content": msg} for role, msg in st.session_state.assistant_msgs[:-1][-6:]]
+            resp = invoke(llm, [
+                {"role": "system", "content": system_prompt + " Ne revendique aucun resultat Web absent. " + web_notice},
+                *history,
+                {"role": "user", "content": human},
+            ], select_provider())
             answer = resp.content if hasattr(resp, "content") else str(resp)
         except Exception as e:
-            answer = f"Erreur LLM : {e}"
+            from utils.llm_runtime import explain
+            answer = f"Erreur LLM : {explain(e)}"
 
         st.session_state.assistant_msgs.append(("assistant", answer))
         st.chat_message("assistant").markdown(answer)

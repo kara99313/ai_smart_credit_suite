@@ -13,7 +13,7 @@ PROJECT_ROOT = Path.cwd()
 DOCS_DIR     = PROJECT_ROOT / "docs_rag"
 DATA_DIR     = PROJECT_ROOT / "data"
 VSTORE_DIR   = PROJECT_ROOT / "vector_store"
-VSTORE_DIR.mkdir(parents=True, exist_ok=True)
+
 
 FAISS_DOCS_PATH   = VSTORE_DIR / "faiss_docs"
 FAISS_HYBRID_PATH = VSTORE_DIR / "faiss_hybrid"
@@ -161,27 +161,14 @@ def _load_chroma(persist_dir: str):
         return None
 
 def build_or_load_faiss_docs(rebuild: bool = False):
-    if (not rebuild) and FAISS_DOCS_PATH.exists():
-        vs = _load_faiss(FAISS_DOCS_PATH)
-        if vs: return vs, FAISS_DOCS_PATH
-    try:
-        docs = _build_docs_from_files()
-        return _build_faiss(docs, FAISS_DOCS_PATH)
-    except Exception:
-        vs = _load_chroma(CHROMA_DOCS_PATH)
-        if vs: return vs, Path(CHROMA_DOCS_PATH)
-        vs = _build_chroma(_build_docs_from_files(), CHROMA_DOCS_PATH)
-        return vs, Path(CHROMA_DOCS_PATH)
+    from utils.rag_service import ReadOnlyStore
+    if rebuild:
+        raise RuntimeError("Reconstruction desactivee : autorisation explicite et phase dediee necessaires.")
+    return ReadOnlyStore('docs', PROJECT_ROOT), FAISS_DOCS_PATH
+
 
 def build_or_load_faiss_hybrid(rebuild: bool = False, client_filter: Optional[str] = None):
-    if (not rebuild) and FAISS_HYBRID_PATH.exists():
-        vs = _load_faiss(FAISS_HYBRID_PATH)
-        if vs: return vs, FAISS_HYBRID_PATH
-    try:
-        docs = _build_docs_hybrid(client_filter=client_filter)
-        return _build_faiss(docs, FAISS_HYBRID_PATH)
-    except Exception:
-        vs = _load_chroma(CHROMA_HYB_PATH)
-        if vs: return vs, Path(CHROMA_HYB_PATH)
-        vs = _build_chroma(_build_docs_hybrid(client_filter=client_filter), CHROMA_HYB_PATH)
-        return vs, Path(CHROMA_HYB_PATH)
+    from utils.rag_service import ReadOnlyStore
+    if rebuild:
+        raise RuntimeError("Reconstruction desactivee : autorisation explicite et phase dediee necessaires.")
+    return ReadOnlyStore('hybrid', PROJECT_ROOT, client_filter), FAISS_HYBRID_PATH

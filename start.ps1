@@ -1,4 +1,5 @@
 # start.ps1
+param([switch]$NoBrowser, [switch]$NoNotification)
 $ErrorActionPreference = "Stop"
 
 function LogInfo($m){ Write-Host $m -ForegroundColor Cyan }
@@ -64,38 +65,26 @@ if(-not (Test-Path $VenvPy)){
   LogOk "Virtual env detected."
 }
 
-# 3) Load .env
-$EnvPath = Join-Path $Root ".env"
-if(Test-Path $EnvPath){
-  LogInfo ".env found. Loading..."
-  Get-Content $EnvPath | Where-Object { $_ -match '^\s*[^#].+=.+$' } | ForEach-Object {
-    $kv = $_ -split '=', 2
-    $k = $kv[0].Trim()
-    $v = $kv[1].Trim()
-    [Environment]::SetEnvironmentVariable($k, $v, "Process")
-  }
-}else{
-  LogWarn ".env not found (not blocking)."
+# 3) Parse .env with python-dotenv and use the same resolver as the API client.
+# JSON is captured privately: never print dotenv_environment (it may contain secrets).
+$ConfigJson = & $VenvPy -B -X utf8 -m utils.runtime_config --include-dotenv
+if ($LASTEXITCODE -ne 0) { throw "Unable to resolve runtime configuration." }
+$LaunchConfig = $ConfigJson | ConvertFrom-Json
+$LaunchConfig.dotenv_environment.PSObject.Properties | ForEach-Object {
+  [Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, "Process")
 }
-
-# 4) Resolve env vars (ports & backend url)
-$HostIP  = $env:API_HOST;  if(-not $HostIP){ $HostIP = "127.0.0.1" }
-$ApiPort = $env:API_PORT;  if(-not $ApiPort){ $ApiPort = "18000" }
-# Par défaut on colle à Streamlit convention (8501) ; .env peut l’écraser
-$UiPort  = $env:WEB_PORT;  if(-not $UiPort){ $UiPort = "8501" }
-
-$BackendURL = "http://$HostIP`:$ApiPort"
+$HostIP = [string]$LaunchConfig.api_host
+$ApiPort = [string]$LaunchConfig.api_port
+$UiPort = [string]$LaunchConfig.web_port
+$BackendURL = [string]$LaunchConfig.backend_url
 [Environment]::SetEnvironmentVariable("BACKEND_URL", $BackendURL, "Process")
-
+[Environment]::SetEnvironmentVariable("API_BASE", $BackendURL, "Process")
 $LLMProv = $env:LLM_PROVIDER; if(-not $LLMProv){ $LLMProv = "ollama" }
-$OModel  = $env:OLLAMA_MODEL; if(-not $OModel){ $OModel = "llama3.2:3b" }
-$OBase   = $env:OLLAMA_BASE_URL; if(-not $OBase){ $OBase = "http://127.0.0.1:11434" }
-$OBase   = $OBase.TrimEnd('/')
-
+$OModel = $env:OLLAMA_MODEL; if(-not $OModel){ $OModel = "llama3.2:3b" }
+$OBase = $env:OLLAMA_BASE_URL; if(-not $OBase){ $OBase = "http://127.0.0.1:11434" }
+$OBase = $OBase.TrimEnd('/')
 LogInfo ("LLM_PROVIDER = {0}" -f $LLMProv)
-LogInfo ("OLLAMA_MODEL = {0}" -f $OModel)
-LogInfo ("OLLAMA_BASE_URL = {0}" -f $OBase)
-LogInfo ("BACKEND_URL  = {0}" -f $BackendURL)
+LogInfo ("BACKEND_URL = {0}" -f $BackendURL)
 
 # 5) (Optionnel) Vérif modèle
 $ModelPath = $env:MODEL_PATH
@@ -120,19 +109,19 @@ function Start-OllamaIfNeeded(){
     return
   }
   LogInfo "Starting 'ollama serve'..."
-  Start-Process -FilePath "ollama" -ArgumentList "serve" -WorkingDirectory $Root -WindowStyle Normal
+  Start-Process -FilePath "ollama" -ArgumentList "serve" -WorkingDirectory $Root -WindowStyle Hidden
 }
 Start-OllamaIfNeeded
 
 # 7) Start backend (FastAPI on 18000)
 LogInfo ("Starting backend on {0}:{1} ..." -f $HostIP, $ApiPort)
 $BackendArgs = @("-m","uvicorn","server:app","--host",$HostIP,"--port",$ApiPort,"--reload")
-Start-Process -FilePath $VenvPy -ArgumentList $BackendArgs -WorkingDirectory $Root -WindowStyle Normal
+Start-Process -FilePath $VenvPy -ArgumentList $BackendArgs -WorkingDirectory $Root -WindowStyle Hidden
 
 # 8) Wait /health
 $HealthURL = "$BackendURL/health"
 if(-not (Wait-Http -url $HealthURL -label "Backend" -retries 120 -delaySec 0.5)){
-  LogErr ("Backend is not responding on {0}. Check the backend window for errors." -f $HealthURL)
+  throw ("Backend is not responding on {0}. Startup stopped." -f $HealthURL)
 }
 
 # 9) Start Streamlit UI — EXACTEMENT comme ta commande OK
@@ -148,15 +137,20 @@ $UiArgs = @(
   "--server.port",$UiPort,
   "--logger.level=debug"
 )
-Start-Process -FilePath $VenvPy -ArgumentList $UiArgs -WorkingDirectory $Root -WindowStyle Normal
+Start-Process -FilePath $VenvPy -ArgumentList $UiArgs -WorkingDirectory $Root -WindowStyle Hidden
+
+$UiHealthURL = "http://127.0.0.1:$UiPort/_stcore/health"
+if (-not (Wait-Http -url $UiHealthURL -label "Streamlit" -retries 120 -delaySec 0.5)) {
+  throw "Streamlit is not responding. Startup stopped."
+}
 
 # 10) Open browser
 LogOk "Opening browser..."
-Start-Process ("http://localhost:{0}" -f $UiPort)
+if (-not $NoBrowser) { Start-Process ("http://localhost:{0}" -f $UiPort) }
 
 # 11) Desktop notification
 $notifTitle = "AI Smart Credit Suite"
 $notifMsg   = "Startup complete. UI on http://localhost:$UiPort  |  Backend: $BackendURL  |  LLM: $LLMProv ($OBase)"
-Show-Notification -title $notifTitle -message $notifMsg
+if (-not $NoNotification) { Show-Notification -title $notifTitle -message $notifMsg }
 
 LogOk "All set. To stop everything: .\stop.ps1"

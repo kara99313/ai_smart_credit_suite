@@ -32,11 +32,8 @@ except Exception:
 # 3) S’assure que le log existe (pour pages qui lisent data/predictions_log.csv)
 LOG_DIR = "data"
 LOG_PATH = os.path.join(LOG_DIR, "predictions_log.csv")
-LOG_HEADER = ["timestamp","client_id","prob_default","pred_label","threshold","inputs_json","model_tag"]
-os.makedirs(LOG_DIR, exist_ok=True)
-if not os.path.exists(LOG_PATH):
-    with open(LOG_PATH, "w", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow(LOG_HEADER)
+from utils.prediction_logs import ensure_prediction_log
+ensure_prediction_log(LOG_PATH)
 
 # 4) Barre latérale “globale”
 with st.sidebar:

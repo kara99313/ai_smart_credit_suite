@@ -12,57 +12,23 @@ REQUIRED_COLS: List[str] = [
 ]
 
 def read_logs_robust(path: str = LOG_PATH_DEFAULT) -> pd.DataFrame:
-    """
-    Lecture tolérante:
-    - supporte anciens (7 colonnes) / nouveaux (9 colonnes)
-    - engine='python' + on_bad_lines='skip' pour ignorer les lignes cassées
-    - garde inputs_json avec virgules/quotes
-    """
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=REQUIRED_COLS)
+    """Read every supported historical record without rewriting or skipping rows."""
+    from utils.prediction_logs import read_prediction_records
+    records = read_prediction_records(path)
+    df = pd.DataFrame(records)
+    for name in REQUIRED_COLS:
+        if name not in df:
+            df[name] = None
+    for name in ("prob_default", "threshold", "pred_label"):
+        df[name] = pd.to_numeric(df[name], errors="coerce")
+    return df.sort_values("timestamp", ascending=False, kind="stable")
 
-    try:
-        df = pd.read_csv(path, engine="python", on_bad_lines="skip")
-    except Exception:
-        # filet de sécurité si le header est lui-même altéré
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            rows = list(csv.reader(f))
-        if not rows:
-            return pd.DataFrame(columns=REQUIRED_COLS)
-        header, data = rows[0], rows[1:]
-        width = max((len(r) for r in data), default=len(header))
-        header = (header + [f"col_{i}" for i in range(width-len(header))])[:width]
-        df = pd.DataFrame(data, columns=header)
-
-    # Colonnes manquantes → compléter
-    for c in REQUIRED_COLS:
-        if c not in df.columns:
-            df[c] = "" if c in ("rating","decision") else None
-
-    # Types
-    if "prob_default" in df.columns:
-        df["prob_default"] = pd.to_numeric(df["prob_default"], errors="coerce")
-    if "threshold" in df.columns:
-        df["threshold"] = pd.to_numeric(df["threshold"], errors="coerce")
-    if "pred_label" in df.columns:
-        df["pred_label"] = pd.to_numeric(df["pred_label"], errors="coerce")
-
-    # Tri
-    if "timestamp" in df.columns:
-        df = df.sort_values("timestamp", ascending=False)
-
-    # Ordre cohérent
-    cols = [c for c in REQUIRED_COLS if c in df.columns]
-    return df[cols]
 
 def sanitize_predictions_log(path: str = LOG_PATH_DEFAULT) -> str:
-    """
-    Réécrit le CSV de log de manière propre (quoting minimal).
-    """
-    df = read_logs_robust(path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    df.to_csv(path, index=False, encoding="utf-8", quoting=csv.QUOTE_MINIMAL)
+    """Compatibility validation only: historical records are never rewritten here."""
+    read_logs_robust(path)
     return path
+
 
 def read_any_csv_robust(path: str) -> pd.DataFrame:
     """

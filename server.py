@@ -1,8 +1,10 @@
 # server.py
 from __future__ import annotations
 import json, os, sys, time
+import hashlib, io
 from typing import Literal, Optional, Dict, Any, List, Tuple, Callable
 from pathlib import Path
+from functools import lru_cache
 
 # ===== UTF-8 partout =====
 os.environ.setdefault("PYTHONUTF8", "1")
@@ -23,11 +25,15 @@ import joblib
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from utils.runtime_config import ROOT
 
 # ===== Chemins / modèle =====
-PROJECT_ROOT = Path(__file__).resolve().parent
-MODEL_PATH = Path(os.getenv("MODEL_PATH", str(PROJECT_ROOT / "model" / "logistic_pipeline_best.pkl")))
+PROJECT_ROOT = ROOT
+MODEL_PATH = Path(os.getenv("MODEL_PATH") or "model/logistic_pipeline_best.pkl")
+if not MODEL_PATH.is_absolute():
+    MODEL_PATH = PROJECT_ROOT / MODEL_PATH
 
 # ===== Features (15) =====
 FEATURES = [
@@ -42,7 +48,10 @@ NUMERIC: set[str] = set(FEATURES) - CATEGORICAL
 try:
     if not MODEL_PATH.exists():
         raise FileNotFoundError(f"Model file not found at {MODEL_PATH}")
-    _pipe = joblib.load(MODEL_PATH)
+    _model_bytes = MODEL_PATH.read_bytes()
+    MODEL_ID = hashlib.sha256(_model_bytes).hexdigest()
+    _pipe = joblib.load(io.BytesIO(_model_bytes))
+    del _model_bytes
 except Exception as e:
     raise RuntimeError(
         f"Impossible de charger le modèle: {MODEL_PATH}\n"
@@ -130,19 +139,73 @@ def _sigmoid(z: float) -> float:
     return 1.0 / (1.0 + np.exp(-z))
 
 def _compute_pd(df: pd.DataFrame) -> float:
-    if hasattr(_pipe, "predict_proba"):
-        proba = _pipe.predict_proba(df)
-        if proba.ndim == 2 and proba.shape[1] >= 2:
-            return float(proba[0, 1])
-        if proba.ndim == 1:
-            return float(proba[0])
-    if hasattr(_pipe, "decision_function"):
-        s = float(np.array(_pipe.decision_function(df)).ravel()[0])
-        return float(_sigmoid(s))
-    if hasattr(_pipe, "predict"):
-        y = int(np.array(_pipe.predict(df)).ravel()[0])
-        return 0.8 if y == 1 else 0.2
-    return 0.5
+    if not callable(getattr(_pipe, "predict_proba", None)):
+        raise RuntimeError("Le modele ne fournit pas predict_proba ; aucune PD disponible.")
+    classes = np.asarray(getattr(_pipe, "classes_", []))
+    if classes.ndim != 1 or classes.size != 2:
+        raise RuntimeError("Un modele binaire avec classes_ est requis.")
+    default_indices = np.flatnonzero(classes == 1)
+    if default_indices.size != 1:
+        raise RuntimeError("Classe defaut numerique 1 absente ou ambigue dans classes_.")
+    proba = np.asarray(_pipe.predict_proba(df), dtype=float)
+    if proba.shape != (len(df), len(classes)) or len(df) != 1:
+        raise RuntimeError("Dimensions invalides de predict_proba.")
+    if not np.isfinite(proba).all() or ((proba < 0) | (proba > 1)).any():
+        raise RuntimeError("predict_proba a renvoye une probabilite invalide.")
+    if not np.allclose(proba.sum(axis=1), 1.0, rtol=0, atol=1e-6):
+        raise RuntimeError("La somme des probabilites doit etre egale a 1.")
+    return float(proba[0, default_indices[0]])
+
+
+def _normalize_prediction_category(value: Any) -> str:
+    """Map supported boolean representations to the learned No/Yes labels."""
+    if isinstance(value, (bool, np.bool_)):
+        return "Yes" if value else "No"
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        if value == 1:
+            return "Yes"
+        if value == 0:
+            return "No"
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"yes", "oui", "true", "vrai", "1", "y", "t"}:
+            return "Yes"
+        if text in {"no", "non", "false", "faux", "0", "n", "f"}:
+            return "No"
+    raise ValueError("Categorie inconnue : utiliser Oui/Non, Yes/No ou un booleen.")
+
+
+def _prepare_prediction_df(raw: Dict[str, Any]) -> pd.DataFrame:
+    """Prepare inference inputs without changing the legacy explanation path."""
+    features = [str(name) for name in getattr(_pipe, "feature_names_in_", [])]
+    if len(features) != len(FEATURES) or set(features) != set(FEATURES):
+        raise RuntimeError("Features du modele incompatibles avec les 15 variables attendues.")
+    missing = [name for name in features if name not in raw]
+    if missing:
+        raise ValueError(f"Variables manquantes : {', '.join(missing)}")
+    row = {}
+    for name in features:
+        if name in CATEGORICAL:
+            row[name] = _normalize_prediction_category(raw[name])
+        else:
+            value = float(raw[name])
+            if not np.isfinite(value):
+                raise ValueError(f"Valeur numerique non finie pour {name}.")
+            row[name] = value
+    # Validate before handle_unknown='ignore' can hide an encoding mismatch.
+    try:
+        preprocessor = _pipe.named_steps["preprocessing"]
+        categorical_names = next(list(columns) for name, _, columns in preprocessor.transformers_ if name == "cat")
+        categories = preprocessor.named_transformers_["cat"].categories_
+    except (AttributeError, KeyError, StopIteration, TypeError) as error:
+        raise RuntimeError("Impossible de verifier l'encodeur categoriel ajuste.") from error
+    if set(categorical_names) != CATEGORICAL or len(categories) != len(categorical_names):
+        raise RuntimeError("Schema categoriel du modele incompatible.")
+    for name, learned in zip(categorical_names, categories):
+        if row[name] not in learned:
+            raise RuntimeError(f"Categorie normalisee de {name} absente de l'encodeur.")
+    return pd.DataFrame([row], columns=features)
+
 
 def _rating_from_pd(v: float) -> str:
     v = float(v)
@@ -161,7 +224,8 @@ def _decision_from_pd(pd_val: float, threshold: float) -> str:
     return "ACCEPT" if pd_val < threshold else "REVIEW/REJECT"
 
 # ===== Pydantic =====
-class PredictRequest(BaseModel):
+class ScoringInputs(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     DTIRatio: float
     TrustScorePsychometric: float
     HouseholdSize: int
@@ -177,7 +241,16 @@ class PredictRequest(BaseModel):
     LoanTerm: int
     LoanAmount: float
     InformalIncome: float
+
+    @field_validator("CommunityGroupMember", "HasMortgage", "HasSocialAid", mode="before")
+    @classmethod
+    def normalize_category(cls, value):
+        return _normalize_prediction_category(value)
+
+
+class PredictRequest(ScoringInputs):
     threshold: float = Field(0.10, ge=0.0, le=1.0)
+
 
 class PredictResponse(BaseModel):
     pd: float
@@ -186,6 +259,8 @@ class PredictResponse(BaseModel):
     decision: Literal["ACCEPT", "REVIEW/REJECT"]
     threshold: float
     used_features: List[str]
+    model_id: str
+    input_id: str
 
 class PredictToolBody(BaseModel):
     data: Dict[str, Any]
@@ -209,22 +284,15 @@ class ReportPayload(BaseModel):
     model_tag: Optional[str] = "pipeline_v1"
     logo_path: Optional[str] = None
 
-class ExplainPayload(BaseModel):
-    DTIRatio: float
-    TrustScorePsychometric: float
-    HouseholdSize: int
-    NumCreditLines: int
-    Income: float
-    CommunityGroupMember: bool
-    HasMortgage: bool
-    MonthsEmployed: int
-    HasSocialAid: bool
-    MobileMoneyTransactions: int
-    Age: int
-    InterestRate: float
-    LoanTerm: int
-    LoanAmount: float
-    InformalIncome: float
+class ExplainPayload(ScoringInputs):
+    expected_model_id: Optional[str] = None
+    expected_input_id: Optional[str] = None
+    expected_pd: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+def _prediction_input_id(df: pd.DataFrame) -> str:
+    normalized = json.dumps(df.iloc[0].to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 # ===== FastAPI =====
 app = FastAPI(title="AI Smart Credit Suite — Backend", version="1.3.0")
@@ -242,11 +310,7 @@ def _warmup_model() -> None:
             "HasSocialAid": False, "MobileMoneyTransactions": 10, "Age": 30, "InterestRate": 10.0,
             "LoanTerm": 12, "LoanAmount": 100000, "InformalIncome": 0.0
         }
-        base = _align_df(dummy)
-        for mode in ("str", "bool", "int"):
-            df = _align_categoricals(base, mode)
-            _ = _compute_pd(df)
-            break
+        _compute_pd(_prepare_prediction_df(dummy))
     except Exception as e:
         print(f"[WARMUP] warning: {e}")
 
@@ -267,7 +331,7 @@ def predict_ping():
 
 @app.post("/api/predict_echo")
 def predict_echo(req: PredictRequest):
-    df = _align_df(req.model_dump())
+    df = _prepare_prediction_df(req.model_dump())
     return {
         "ok": True,
         "columns": list(df.columns),
@@ -279,27 +343,21 @@ def predict_echo(req: PredictRequest):
 def api_predict(req: PredictRequest):
     try:
         raw = req.model_dump()
-        base_df = _align_df(raw)
-        last_err: Optional[Exception] = None
-        for mode in ("str", "bool", "int"):
-            try:
-                df = _align_categoricals(base_df, mode)
-                pd_val = _compute_pd(df)
-                score = int(round((1 - pd_val) * 1000))
-                rating = _rating_from_pd(pd_val)
-                decision = _decision_from_pd(pd_val, req.threshold)
-                return PredictResponse(
-                    pd=pd_val, score_1000=score, rating=rating, decision=decision,
-                    threshold=req.threshold, used_features=list(df.columns),
-                )
-            except (ValueError, TypeError) as e:
-                last_err = e
-                continue
-        raise RuntimeError(f"All category coercion modes failed: {last_err}")
+        df = _prepare_prediction_df(raw)
+        pd_val = _compute_pd(df)
+        score = int(round((1 - pd_val) * 1000))
+        rating = _rating_from_pd(pd_val)
+        decision = _decision_from_pd(pd_val, req.threshold)
+        return PredictResponse(
+            pd=pd_val, score_1000=score, rating=rating, decision=decision,
+            threshold=req.threshold, used_features=list(df.columns),
+            model_id=MODEL_ID, input_id=_prediction_input_id(df),
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"predict failed: {type(e).__name__}: {e}")
 
 # ===== Outils Agent IA =====
+@lru_cache(maxsize=1)
 def _import_agent_tools() -> Tuple[
     Callable[[str], str],
     Callable[[str, str, int], str],
@@ -315,12 +373,12 @@ def _import_agent_tools() -> Tuple[
     now_fn = getattr(at, "now_tool", lambda fmt="%Y-%m-%d %H:%M:%S": __import__("datetime").datetime.now().isoformat())
     return predict_fn, rag_fn, web_fn, rep_fn, now_fn
 
-_predict_tool, _rag_tool, _web_tool, _report_tool, _now_tool = _import_agent_tools()
+# Optional tool dependencies are loaded only when their routes are called.
 
 @app.post("/tools/predict_credit")
 def tools_predict_credit(body: PredictToolBody):
     try:
-        txt = _predict_tool(json.dumps(body.data, ensure_ascii=False))
+        txt = _import_agent_tools()[0](json.dumps(body.data, ensure_ascii=False))
         return {"ok": True, "result": txt}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"predict_credit error: {e}")
@@ -328,7 +386,7 @@ def tools_predict_credit(body: PredictToolBody):
 @app.post("/tools/rag_search")
 def tools_rag_search(body: RAGPayload):
     try:
-        txt = _rag_tool(body.query, mode=body.mode or "docs", k=body.k or 4)
+        txt = _import_agent_tools()[1](body.query, mode=body.mode or "docs", k=body.k or 4)
         return {"ok": True, "result": txt}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"rag_search error: {e}")
@@ -336,7 +394,7 @@ def tools_rag_search(body: RAGPayload):
 @app.post("/tools/web_search")
 def tools_web_search(body: WebSearchPayload):
     try:
-        txt = _web_tool(body.query, k=body.k or 3, fetch=bool(body.fetch))
+        txt = _import_agent_tools()[2](body.query, k=body.k or 3, fetch=bool(body.fetch))
         return {"ok": True, "result": txt}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"web_search error: {e}")
@@ -353,7 +411,7 @@ def tools_generate_report(body: ReportPayload):
             "model_tag": body.model_tag,
             "logo_path": body.logo_path,
         }
-        html = _report_tool(json.dumps(ctx, ensure_ascii=False))
+        html = _import_agent_tools()[3](json.dumps(ctx, ensure_ascii=False))
         return {"ok": True, "html": html}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"generate_report error: {e}")
@@ -361,96 +419,37 @@ def tools_generate_report(body: ReportPayload):
 @app.get("/tools/now")
 def tools_now(fmt: str = "%Y-%m-%d %H:%M:%S"):
     try:
-        return {"ok": True, "now": _now_tool(fmt)}
+        return {"ok": True, "now": _import_agent_tools()[4](fmt)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"now error: {e}")
 
-# ===== Explain (SHAP + fallback) =====
-def _extract_estimator_and_features():
-    est = _pipe
-    feats: List[str] = []
-    if hasattr(_pipe, "feature_names_in_"):
-        feats = [str(c) for c in getattr(_pipe, "feature_names_in_")]
-    try:
-        from sklearn.pipeline import Pipeline
-        if isinstance(_pipe, Pipeline):
-            est = _pipe.steps[-1][1]
-    except Exception:
-        pass
-    return est, feats or FEATURES
-
-def _try_shap_values(df: pd.DataFrame) -> Optional[Dict[str, float]]:
-    try:
-        import shap  # type: ignore
-        explainer = shap.Explainer(_pipe)   # auto: Tree/Linear/Kernel
-        sv = explainer(df.iloc[[0]])
-        vals = None
-        if hasattr(sv, "values"):
-            arr = sv.values
-            if isinstance(arr, list):   # multi-classes -> dernière classe
-                arr = arr[-1]
-            arr = getattr(arr, "data", arr)
-            try:
-                arr = arr.reshape(-1)
-            except Exception:
-                pass
-            vals = [float(x) for x in list(arr)]
-        if vals is None:
-            return None
-        _, feats = _extract_estimator_and_features()
-        out = {}
-        for i, name in enumerate(feats[: len(vals)]):
-            out[name] = float(vals[i])
-        return out
-    except Exception:
-        return None
-
-def _simple_importances(df: pd.DataFrame) -> Dict[str, float]:
-    est, feats = _extract_estimator_and_features()
-    imp: Dict[str, float] = {}
-    coef = getattr(est, "coef_", None)
-    if coef is not None:
-        arr = np.array(coef).ravel()
-        for i, name in enumerate(feats[: len(arr)]):
-            imp[name] = float(abs(arr[i]))
-        if imp:
-            return imp
-    fimp = getattr(est, "feature_importances_", None)
-    if fimp is not None:
-        arr = np.array(fimp).ravel()
-        for i, name in enumerate(feats[: len(arr)]):
-            imp[name] = float(abs(arr[i]))
-        if imp:
-            return imp
-    try:
-        var = df.var(numeric_only=True).to_dict()
-        imp = {k: float(abs(v) if v is not None else 0.0) for k, v in var.items()}
-    except Exception:
-        imp = {k: 1.0 for k in feats}
-    return imp
-
+# ===== Explain: validated global fallback, separate from individual contributions =====
 @app.post("/tools/explain")
 def tools_explain(body: ExplainPayload, top_k: int = Query(10, ge=1, le=30)):
+    from utils.scoring_explanations import global_coefficient_importance
     try:
-        base_df = _align_df(body.model_dump())
-        df = _align_categoricals(base_df, "bool")
-
-        shap_imp = _try_shap_values(df)
-        if shap_imp:
-            items = sorted(shap_imp.items(), key=lambda kv: abs(kv[1]), reverse=True)[: int(top_k)]
-            return {"ok": True, "method": "shap", "items": [
-                {"feature": k, "contribution": float(v)} for k, v in items
-            ]}
-
-        imp = _simple_importances(df)
-        if not imp:
-            return {"ok": False, "reason": "no_importance_available", "items": []}
-        items = sorted(imp.items(), key=lambda kv: kv[1], reverse=True)[: int(top_k)]
-        return {"ok": True, "method": "fallback_importance", "items": [
-            {"feature": k, "importance": float(v)} for k, v in items
-        ]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"explain error: {e}")
+        df = _prepare_prediction_df(body.model_dump())
+        input_id = _prediction_input_id(df)
+        pd_value = _compute_pd(df)
+        if body.expected_model_id is not None and body.expected_model_id != MODEL_ID:
+            raise HTTPException(status_code=409, detail="Explanation model differs from prediction model.")
+        if body.expected_input_id is not None and body.expected_input_id != input_id:
+            raise HTTPException(status_code=409, detail="Explanation inputs differ from prediction inputs.")
+        if body.expected_pd is not None and not np.isclose(body.expected_pd, pd_value, rtol=1e-12, atol=1e-12):
+            raise HTTPException(status_code=409, detail="Explanation probability differs from prediction probability.")
+        provenance = {"model_id": MODEL_ID, "input_id": input_id, "predicted_pd": pd_value}
+        try:
+            result = global_coefficient_importance(_pipe, df)
+        except (ValueError, TypeError, AttributeError, KeyError, IndexError) as error:
+            return {"ok": False, "method": "unavailable", "scope": "global",
+                    "reason": "invalid_global_explanation", "detail": str(error),
+                    "items": [], **provenance}
+        result["items"] = sorted(result["items"], key=lambda item: item["importance"], reverse=True)[:int(top_k)]
+        return {**result, **provenance}
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"explain error: {error}")
 
 # ===== Debug utiles =====
 @app.get("/debug/imports")

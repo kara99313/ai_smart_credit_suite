@@ -1,6 +1,8 @@
 # utils/report_generator.py
 from __future__ import annotations
 import json
+import math
+from html import escape
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, Optional, List
 
@@ -40,158 +42,140 @@ def _risk_level_from_rating(r: str) -> str:
     }
     return table.get((r or "").upper(), "Inconnu")
 
+def _missing(value):
+    return value is None or str(value).strip().lower() in {"", "nan", "none", "null", "nat", "n/a", "<na>"}
+
+
+def _optional_text(value):
+    return None if _missing(value) else str(value).strip()
+
+
+def normalize_report_context(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate source values; do not choose a rating or decision policy."""
+    result = dict(ctx)
+    notes = list(result.get("data_notes") or [])
+    value = result.get("pd_value", result.get("prob_default"))
+    try:
+        if isinstance(value, bool) or _missing(value):
+            raise ValueError()
+        probability = float(value)
+        if not math.isfinite(probability) or not 0 <= probability <= 1:
+            raise ValueError()
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError("PD absente ou invalide : generation du rapport impossible.")
+    result["pd_value"] = probability
+    threshold = result.get("threshold")
+    if _missing(threshold):
+        result["threshold"] = None
+        notes.append("Seuil historique non renseigne.")
+    else:
+        try:
+            threshold = float(threshold)
+            if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+                raise ValueError()
+            result["threshold"] = threshold
+        except (TypeError, ValueError):
+            result["threshold"] = None
+            notes.append("Seuil historique invalide ; aucune valeur par defaut appliquee.")
+    score = result.get("score_1000")
+    if _missing(score):
+        result["score_1000"] = int(round((1.0 - probability) * 1000))
+        result["score_source"] = "derived_from_pd"
+        notes.append("Score non archive : reconstitue avec la formule existante round(1000 * (1 - PD)).")
+    else:
+        numeric_score = float(score)
+        if isinstance(score, bool) or not math.isfinite(numeric_score) or not numeric_score.is_integer() or not 0 <= numeric_score <= 1000:
+            raise ValueError("Score enregistre invalide.")
+        result["score_1000"] = int(numeric_score)
+        result.setdefault("score_source", "recorded")
+    rating = _optional_text(result.get("rating"))
+    if rating and rating.upper() not in {"AAA", "AA", "A", "BBB", "BB", "B", "CCC", "CC", "C", "D"}:
+        notes.append("Notation historique invalide ; aucune grille de remplacement appliquee.")
+        rating = None
+    if rating is None:
+        notes.append("Notation non renseignee ; aucun rating recalcule.")
+    result["rating"] = rating
+    result["decision"] = _optional_text(result.get("decision"))
+    if result["decision"] is None:
+        notes.append("Decision historique non renseignee ; aucune politique choisie.")
+    risk = _optional_text(result.get("risk_level"))
+    if risk is None and rating:
+        risk = _risk_level_from_rating(rating)
+        notes.append("Niveau de risque non archive : correspondance existante de la notation conservee.")
+    result["risk_level"] = risk
+    for name in ("client_id", "timestamp", "model_tag"):
+        result[name] = _optional_text(result.get(name))
+    inputs = result.get("inputs")
+    if not isinstance(inputs, dict):
+        try:
+            inputs = json.loads(result.get("inputs_json") or "{}")
+            if not isinstance(inputs, dict):
+                raise ValueError()
+        except (ValueError, TypeError):
+            inputs = {}
+            notes.append("Variables d'entree historiques illisibles.")
+    result["inputs"] = inputs
+    result["inputs_json"] = json.dumps(inputs, ensure_ascii=False, default=str)
+    result["data_notes"] = list(dict.fromkeys(notes))
+    return result
+
+
 def build_report_context(
-    client_id: str,
-    timestamp: str,
-    pd_value: float,
-    threshold: float,
-    inputs_json: str,
-    model_tag: str,
-    logo_path: Optional[str] = None,
+    client_id: str, timestamp: str, pd_value: float, threshold: float,
+    inputs_json: str, model_tag: str, logo_path: Optional[str] = None,
     primary_color: str = "#0F766E",
-    footer_text: str = "Sous réserve des politiques internes de risque & conformité.",
-    rating: Optional[str] = None,
-    score_1000: Optional[int] = None,
-    decision: Optional[str] = None,
+    footer_text: str = "Sous reserve des politiques internes de risque.",
+    rating: Optional[str] = None, score_1000: Optional[int] = None,
+    decision: Optional[str] = None, risk_level: Optional[str] = None,
+    model_id: Optional[str] = None, input_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Construit un dict propre utilisé par HTML & PDF."""
-    if score_1000 is None:
-        score_1000 = int(round((1.0 - max(0.0, min(pd_value, 1.0))) * 1000))
-    if not rating:
-        rating = _infer_rating(pd_value)
-    if not decision:
-        decision = "ACCEPT" if pd_value < threshold else "REVUE / REFUS"
-    return asdict(ReportContext(
-        client_id=client_id,
-        timestamp=timestamp,
-        pd_value=float(pd_value),
-        threshold=float(threshold),
-        model_tag=model_tag,
-        inputs_json=inputs_json,
-        logo_path=logo_path,
-        primary_color=primary_color,
-        footer_text=footer_text,
-        rating=rating,
-        score_1000=int(score_1000),
-        decision=decision,
+    return normalize_report_context(dict(
+        client_id=client_id, timestamp=timestamp, pd_value=pd_value, threshold=threshold,
+        inputs_json=inputs_json, model_tag=model_tag, logo_path=logo_path,
+        primary_color=primary_color, footer_text=footer_text, rating=rating,
+        score_1000=score_1000, decision=decision, risk_level=risk_level,
+        model_id=model_id, input_id=input_id,
     ))
 
-# =============== HTML ===============
-def _pretty_json(js: str) -> str:
-    try:
-        obj = json.loads(js or "{}")
-        return json.dumps(obj, ensure_ascii=False, indent=2)
-    except Exception:
-        return js or "{}"
+
+def report_display_values(ctx):
+    def text(value):
+        return "Non renseigne" if _missing(value) else str(value)
+    return {
+        "client_id": text(ctx.get("client_id")),
+        "timestamp": text(ctx.get("timestamp")),
+        "model_tag": text(ctx.get("model_tag")),
+        "pd_value": f"{ctx['pd_value']:.2%}",
+        "score_1000": str(ctx["score_1000"]),
+        "rating": text(ctx.get("rating")),
+        "risk_level": text(ctx.get("risk_level")),
+        "decision": text(ctx.get("decision")),
+        "threshold": "Non renseigne" if ctx.get("threshold") is None else f"{ctx['threshold']:.2%}",
+    }
+
 
 def render_html_report(ctx: Dict[str, Any]) -> str:
-    """
-    Rend un rapport HTML (avec niveau de risque ajouté dans le tableau).
-    Plan : Couverture → Résumé exécutif → Résultats → Explication → Conformité → Annexes → Conclusion.
-    """
-    color = ctx.get("primary_color", "#0F766E")
-    logo = ctx.get("logo_path") or ""
-    client_id = ctx.get("client_id", "N/A")
-    ts = ctx.get("timestamp", "")
-    pdv = float(ctx.get("pd_value", 0.0))
-    thr = float(ctx.get("threshold", 0.1))
-    rating = ctx.get("rating") or _infer_rating(pdv)
-    score_1000 = int(ctx.get("score_1000", 0))
-    decision = ctx.get("decision") or ("ACCEPT" if pdv < thr else "REVUE / REFUS")
-    risk_level = _risk_level_from_rating(rating)
-    inputs_pretty = _pretty_json(ctx.get("inputs_json", "{}"))
-    model_tag = ctx.get("model_tag", "pipeline_v1")
+    ctx = normalize_report_context(ctx)
+    values = {key: escape(value) for key, value in report_display_values(ctx).items()}
+    labels = [("pd_value", "PD"), ("score_1000", "Score (0-1000)"),
+              ("rating", "Notation"), ("risk_level", "Niveau de risque"),
+              ("decision", "Decision"), ("threshold", "Seuil utilise")]
+    rows = "".join(f'<tr><th>{label}</th><td data-field="{key}">{values[key]}</td></tr>' for key, label in labels)
+    notes = "".join(f"<li>{escape(note)}</li>" for note in ctx["data_notes"])
+    inputs = escape(json.dumps(ctx["inputs"], ensure_ascii=False, indent=2, default=str))
+    return f"""<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"><title>Rapport credit</title>
+<style>body{{font-family:Arial,sans-serif;margin:32px;color:#0b1220}}table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ccc;padding:9px;text-align:left}}pre{{white-space:pre-wrap;overflow-wrap:anywhere}}h1,h2{{color:#0F766E}}</style>
+</head><body><h1>Rapport de scoring credit</h1>
+<p>Client : <b>{values['client_id']}</b> | Date du dossier : {values['timestamp']}<br>Modele : {values['model_tag']}</p>
+<h2>Resultats conserves</h2><table>{rows}</table>
+<h2>Disponibilite des donnees</h2><ul>{notes or '<li>Valeurs fournies par la source du dossier.</li>'}</ul>
+<h2>Explicabilite</h2><p>Aucune explication individuelle validee n'est disponible pour ce dossier.
+Une importance globale du modele ne constitue pas une contribution individuelle au risque du client.</p>
+<h2>Limites de validation</h2><p>L'horizon du defaut, la calibration, le backtesting et la conformite reglementaire ne sont pas etablis par ce rapport.</p>
+<h2>Variables d'entree archivees</h2><pre>{inputs}</pre>
+<p>{escape(str(ctx.get('footer_text') or ''))}</p></body></html>"""
 
-    html = f"""
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="utf-8" />
-<title>Rapport crédit — {client_id}</title>
-<style>
-  body {{ font-family: Arial, sans-serif; color:#0b1220; margin:28px; }}
-  .cover {{
-    border:2px solid {color}; border-radius:12px; padding:18px; margin-bottom:20px;
-    background: linear-gradient(180deg, {color}1A, #ffffff 60%);
-  }}
-  .brand {{ display:flex; align-items:center; gap:12px; }}
-  .brand img {{ height:52px; }}
-  h1 {{ margin:0; font-size:24px; }}
-  h2 {{ margin-top:28px; font-size:20px; border-bottom:2px solid {color}; padding-bottom:6px; }}
-  h3 {{ margin-top:16px; font-size:16px; color:#334155; }}
-  .meta {{ color:#334155; }}
-  table {{ border-collapse: collapse; width:100%; }}
-  th, td {{ border:1px solid #e5e7eb; padding:10px; text-align:left; }}
-  th {{ background:#f8fafc; }}
-  .kpi {{ background:#0b1220; color:#e8edf6; border-radius:12px; padding:12px; margin:6px 0; }}
-  .footer {{ margin-top:24px; color:#6b7280; font-size:12px; }}
-  pre {{ background:#f7fafc; border:1px solid #e5e7eb; padding:12px; border-radius:10px; overflow:auto; }}
-  .toc li {{ margin:4px 0; }}
-</style>
-</head>
-<body>
-
-<div class="cover">
-  <div class="brand">
-    {('<img src="'+logo+'" alt="logo">') if logo else ''}
-    <div>
-      <h1>Rapport de Scoring Crédit — {client_id}</h1>
-      <div class="meta">Date : <b>{ts}</b> &nbsp;|&nbsp; Modèle : <b>{model_tag}</b></div>
-    </div>
-  </div>
-</div>
-
-<h2>Sommaire</h2>
-<ol class="toc">
-  <li>Résumé exécutif</li>
-  <li>Résultats chiffrés</li>
-  <li>Explication & facteurs clés</li>
-  <li>Conformité & gouvernance</li>
-  <li>Annexes (entrées & trace)</li>
-  <li>Conclusion</li>
-</ol>
-
-<h2>1. Résumé exécutif</h2>
-<p>Ce rapport présente la décision de crédit pour le client <b>{client_id}</b>, basée sur le modèle <b>{model_tag}</b>.
-La probabilité de défaut (PD) estimée est de <b>{pdv:.2%}</b> pour un seuil interne de <b>{thr:.2%}</b>.
-La notation calculée est <b>{rating}</b> (niveau de risque : <b>{risk_level}</b>) pour un score de <b>{score_1000}/1000</b>.
-Décision proposée : <b>{decision}</b>.</p>
-
-<h2>2. Résultats chiffrés</h2>
-<table>
-  <tr><th>PD</th><td>{pdv:.2%}</td><th>Score (0–1000)</th><td>{score_1000}</td></tr>
-  <tr><th>Notation</th><td>{rating}</td><th>Seuil interne</th><td>{thr:.2%}</td></tr>
-  <tr><th>Niveau de risque</th><td>{risk_level}</td><th>Décision</th><td>{decision}</td></tr>
-</table>
-
-<div class="kpi">Interprétation rapide : une PD de {pdv:.2%} au-dessus d’un seuil de {thr:.2%} indique un profil à surveiller.
-La notation {rating} traduit un niveau de risque « {risk_level} ». La décision doit être confirmée au regard des politiques internes.</div>
-
-<h2>3. Explication & facteurs clés</h2>
-<p>Les facteurs explicatifs (SHAP/coefficients selon disponibilité) sont détaillés dans la page “Prédiction” de l’application.
-Ils permettent d’identifier les variables qui augmentent ou réduisent le risque. Un suivi spécifique peut être recommandé
-sur les variables les plus contributives.</p>
-
-<h2>4. Conformité & gouvernance</h2>
-<ul>
-  <li><b>IFRS 9 :</b> calcul PD compatible ECL, documentation de la méthode, traçabilité.</li>
-  <li><b>Bâle/BCBS 239 :</b> qualité des données, audit trail, agrégation et reporting.</li>
-  <li><b>Éthique & IA Act :</b> transparence des modèles, explicabilité, non-discrimination.</li>
-</ul>
-
-<h2>5. Annexes — Entrées & trace</h2>
-<h3>Entrées du client (JSON)</h3>
-<pre>{inputs_pretty}</pre>
-
-<h2>6. Conclusion</h2>
-<p>Au vu des éléments ci-dessus, la décision proposée est : <b>{decision}</b>.
-Les comités compétents peuvent exiger des justificatifs complémentaires (revenus, garanties, historique) avant validation finale.</p>
-
-<div class="footer">{ctx.get("footer_text","")}</div>
-</body>
-</html>
-""".strip()
-    return html
 
 # =============== HTML -> PDF (basique via ReportLab) ===============
 def html_to_pdf_bytes(html: str, title: str = "Rapport crédit", logo_path: Optional[str] = None) -> bytes:
@@ -235,9 +219,9 @@ def html_to_pdf_bytes(html: str, title: str = "Rapport crédit", logo_path: Opti
         table_rows = re.findall(r"<tr>(.*?)</tr>", html, flags=re.S | re.I)
         if table_rows:
             data = []
-            for row in table_rows[:3]:  # notre tableau principal a 3 lignes
+            for row in table_rows:  # retain every result row
                 cells_th = re.findall(r"<th>(.*?)</th>", row, flags=re.S | re.I)
-                cells_td = re.findall(r"<td>(.*?)</td>", row, flags=re.S | re.I)
+                cells_td = re.findall(r"<td\b[^>]*>(.*?)</td>", row, flags=re.S | re.I)
                 # alterner TH/TD
                 row_data: List[str] = []
                 for a, b in zip(cells_th, cells_td):

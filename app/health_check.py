@@ -1,60 +1,92 @@
-# app/health_check.py
-from __future__ import annotations
-import os
-import requests
+"""Explicit, isolated, read-only health probes; never build an index on page load."""
+from pathlib import Path
 import streamlit as st
+from utils.runtime_config import ROOT, backend_url
+from utils import health_diagnostics as checks
 
-st.title("🩺 Health Check")
+PROJECT_ROOT=ROOT
 
-def get_secret(k: str, default: str = "") -> str:
-    """Lit d'abord st.secrets (Cloud), sinon ENV (local)."""
+
+def show(label,probe):
+    st.write(f"**{label} : {probe['state']}**")
+    st.caption(f"{probe['explanation']} Dernier controle : {probe['checked_at']} (UTC).")
+    details={key:value for key,value in probe.items() if key not in {'state','explanation','checked_at'}}
+    if details:
+        st.json(checks.redact(details))
+
+
+def main():
+    st.title('Health Check')
+    st.caption('Configure seulement = configuration presente ; Disponible = ressource joignable/chargeable ; Fonctionnel = test minimal reel reussi. Non teste ne signifie pas en panne.')
+    env=checks.environment_inventory(PROJECT_ROOT)
+    st.subheader('Environnement et configuration (aucun appel externe)')
+    st.json(env)
+    st.caption("BACKEND_URL puis API_BASE, puis config.yaml et adresse de repli : resolution commune utils.runtime_config. .env est charge sans ecraser les variables existantes. Versions detectees ne signifie pas imports fonctionnels.")
+    if not env['model_readable']:
+        st.warning('Artefact du modele absent ou inaccessible sur ce poste ; cela ne renseigne pas un backend distant.')
+    state_key='health_checks'
+    state=st.session_state.setdefault(state_key,{})
     try:
-        return st.secrets.get(k, default)
+        base=backend_url()
     except Exception:
-        return os.getenv(k, default)
-
-LLM_PROVIDER = (get_secret("LLM_PROVIDER", os.getenv("LLM_PROVIDER", "")) or "").lower()
-GROQ_MODEL   = get_secret("GROQ_MODEL",   os.getenv("GROQ_MODEL", ""))
-GROQ_API_KEY = get_secret("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
-OPENAI_KEY   = get_secret("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", ""))
-BACKEND_URL  = get_secret("BACKEND_URL",  os.getenv("BACKEND_URL", ""))
-OLLAMA_URL   = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("LLM_PROVIDER", LLM_PROVIDER or "—")
-c2.metric("LLM_MODEL", GROQ_MODEL or "—")
-c3.metric("BACKEND_URL", BACKEND_URL or "—")
-c4.metric("OLLAMA", OLLAMA_URL or "—")
-st.write(
-    "**Groq key ?**", "✅" if bool(GROQ_API_KEY) else "❌",
-    " • **OpenAI key ?**", "✅" if bool(OPENAI_KEY) else "❌"
-)
-
-# 1) LLM loader (via utilitaire)
-try:
-    from utils.llm_providers import load_llm
-    _ = load_llm()
-    st.success("LLM OK (load_llm)")
-except Exception as e:
-    st.error(f"LLM KO: {e}")
-
-# 2) Backend /health (optionnel)
-if BACKEND_URL:
-    try:
-        r = requests.get(BACKEND_URL.rstrip("/") + "/health", timeout=5)
-        st.info(f"/health → {r.status_code} {r.text[:160]}")
-    except Exception as e:
-        st.error(f"Backend KO: {e}")
-else:
-    st.warning("BACKEND_URL non défini (OK si tu n'utilises pas /api/predict).")
-
-# 3) RAG (index documents)
-try:
-    from utils.rag_utils import build_or_load_faiss_docs
-    vs, path = build_or_load_faiss_docs(rebuild=False)
-    if vs:
-        st.success(f"RAG OK : {path}")
+        base=None
+    # Never show a result obtained for a different URL or a different local project.
+    identity=(base,str(PROJECT_ROOT))
+    if state.get('identity')!=identity:
+        state={'identity':identity}
+        st.session_state[state_key]=state
+    st.subheader('FastAPI et modele')
+    if st.button('Tester GET /health',disabled=base is None):
+        state['api']=checks.backend_check(base)
+    if 'api' in state:
+        show('FastAPI',state['api'])
+        declared=state['api'].get('model_loaded')
+        st.write('Modele charge :', 'declaration model_loaded=True du backend' if declared is True else 'non confirme')
     else:
-        st.warning("RAG: index absent. Ajoute des fichiers dans docs_rag/ puis recharge.")
-except Exception as e:
-    st.error(f"RAG KO: {e}")
+        st.write('FastAPI : Configure seulement' if base else 'FastAPI : Indisponible (configuration invalide)')
+        st.write('Modele charge : Non teste')
+    st.caption('/health renvoie actuellement model_loaded=True sans nouveau test d inference. Le warm-up intercepte ses erreurs ; /health ne certifie donc pas une inference reussie.')
+    if st.button('Tester une inference synthetique',disabled=base is None):
+        state['inference']=checks.inference_check(base)
+    if 'inference' in state:
+        show('Inference du modele',state['inference'])
+    else:
+        st.write('Inference du modele : Non teste')
+    st.caption('Test explicite via /api/predict, donnees synthetiques non journalisees. Aucun ajout au CSV ni au JSONL.')
+    st.subheader('Fournisseurs LLM')
+    inventory=checks.provider_inventory()
+    st.dataframe(inventory,hide_index=True,width='stretch')
+    st.caption('Groq, OpenAI et Ollama sont supportes. Une cle presente ou un connecteur installe ne prouve pas une reponse. Un test ci-dessous peut consommer un petit quota (budget minimal de 8 tokens (128 pour les modeles a raisonnement), sans retry).')
+    provider=st.selectbox('Fournisseur a tester',list(checks.PROVIDERS))
+    if st.button('Tester le fournisseur selectionne (appel reel)'):
+        state['llm_'+provider]=checks.provider_check(provider)
+    for item in inventory:
+        name=item['provider']
+        if 'llm_'+name in state:
+            show(name,state['llm_'+name])
+        else:
+            st.write(f"{name} : {item['state']} ; appel fonctionnel Non teste")
+    st.subheader('RAG / FAISS')
+    show('Corpus documentaire',checks.corpus_inventory(PROJECT_ROOT))
+    index_name=st.selectbox('Index a diagnostiquer',['faiss_docs','faiss_hybrid'])
+    path=Path(PROJECT_ROOT)/'vector_store'/index_name
+    present=(path/'index.faiss').is_file() and (path/'index.pkl').is_file()
+    st.write('Fichiers index : Configure seulement (paire presente)' if present else 'Fichiers index : Indisponible (paire absente/incomplete)')
+    if st.button('Charger et verifier l index existant'):
+        state['index_'+index_name]=checks.index_check(path,PROJECT_ROOT,hybrid=index_name=='faiss_hybrid')
+    if 'index_'+index_name in state:
+        show('Chargement FAISS',state['index_'+index_name])
+    else:
+        st.write('Chargement FAISS : Non teste')
+    if st.button('Tester le retrieval local sans telechargement'):
+        state['retrieval_'+index_name]=checks.retrieval_check(path)
+    if 'retrieval_'+index_name in state:
+        show('Retrieval RAG',state['retrieval_'+index_name])
+    else:
+        st.write('Retrieval RAG : Non teste')
+    st.caption("Aucun build_or_load, reconstruction, sauvegarde ou telechargement. Metadata chargees avec une liste restreinte de classes. "
+               "Sources verifiees seulement par existence ; fraicheur, identite des embeddings et pertinence restent A verifier. La generation de reponse RAG n'est pas testee.")
+
+
+if __name__=='__main__':
+    main()

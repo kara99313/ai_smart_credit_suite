@@ -1,9 +1,34 @@
+﻿# Preparation only. Persistence and optional RAG bundle require operator decisions.
 services:
-  - type: web
-    name: ai_smart_credit_suite
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+  - type: pserv
+    name: ai-smart-api
+    runtime: docker
+    branch: audit-codex
+    autoDeployTrigger: "off"
+    dockerfilePath: ./infra/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m utils.launch api
     envVars:
-      - key: PIP_ONLY_BINARY
-        value: ":all:"
+      - key: API_HOST
+        value: 0.0.0.0
+      - key: API_PORT
+        value: "8000"
+      - key: PORT
+        value: "8000"
+  - type: web
+    name: ai-smart-web
+    runtime: docker
+    branch: audit-codex
+    autoDeployTrigger: "off"
+    dockerfilePath: ./infra/Dockerfile
+    dockerContext: .
+    dockerCommand: python -m utils.launch web
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: WEB_HOST
+        value: 0.0.0.0
+      - key: INTERNAL_API_HOSTPORT
+        fromService:
+          type: pserv
+          name: ai-smart-api
+          property: hostport

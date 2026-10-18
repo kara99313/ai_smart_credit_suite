@@ -3,7 +3,10 @@ from __future__ import annotations
 import re
 import html as htmlmod
 import time
-from dataclasses import dataclass
+import math
+from urllib.parse import urlsplit
+from utils.llm_runtime import get_setting
+from html.parser import HTMLParser
 from typing import List, Dict, Iterable
 
 import requests
@@ -18,11 +21,56 @@ except Exception:
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Streamlit/WebSearch"}
 DEFAULT_TIMEOUT = 10.0
 
-@dataclass
-class WebHit:
-    title: str
-    href: str
-    body: str
+class WebSearchError(RuntimeError):
+    """Safe connector error; never include response bodies or credentials."""
+
+
+def normalize_domains(domains):
+    if not isinstance(domains, list):
+        raise ValueError("Liste de domaines invalide.")
+    normalized = []
+    for value in domains:
+        if not isinstance(value, str):
+            raise ValueError("Domaine invalide.")
+        value = value.strip().lower().rstrip(".")
+        try:
+            value = value.encode("idna").decode("ascii")
+        except UnicodeError:
+            raise ValueError("Domaine invalide.") from None
+        if not value or len(value) > 253 or not all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in value.split(".")):
+            raise ValueError("Saisir des noms de domaine sans URL, port ni chemin.")
+        if value not in normalized:
+            normalized.append(value)
+    return normalized
+
+
+def web_configuration():
+    from utils.settings import get_settings
+    cfg = get_settings()
+    enabled = get_setting("WEB_SEARCH_ENABLED", str(cfg.enable_web_search)).strip().lower()
+    if enabled not in {"true", "false", "1", "0"}:
+        raise ValueError("WEB_SEARCH_ENABLED doit valoir true ou false.")
+    env_domains = get_setting("WEB_ALLOWED_DOMAINS", "")
+    domains = normalize_domains([d.strip() for d in env_domains.split(",") if d.strip()] if env_domains else cfg.allowed_domains)
+    try:
+        timeout = float(get_setting("WEB_TIMEOUT", "10"))
+        limit = int(cfg.web_search_max)
+        if not math.isfinite(timeout) or not 0 < timeout <= 60 or not 1 <= limit <= 10:
+            raise ValueError()
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("Configuration Web invalide : timeout (0,60], maximum de resultats [1,10].") from None
+    return dict(enabled=enabled in {"true", "1"}, domains=domains, timeout=timeout, max_results=limit)
+
+
+def _allowed_url(url, domains=()):
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".").encode("idna").decode("ascii")
+        return bool(parsed.scheme in {"http", "https"} and host and not parsed.username and not parsed.password
+                    and (not domains or any(host == domain or host.endswith("." + domain) for domain in domains)))
+    except (ValueError, TypeError, UnicodeError):
+        return False
+
 
 # ----------------- Utilitaires -----------------
 def _clean_text(s: str) -> str:
@@ -51,21 +99,23 @@ def _dedup_hits(hits: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
     seen = set()
     out: List[Dict[str, str]] = []
     for h in hits:
-        key = (_norm_href(h.get("href", "")) or "").lower()
-        if key and key not in seen:
+        if not isinstance(h, dict) or not all(isinstance(h.get(key, ""), str) for key in ("href", "title", "body")):
+            continue
+        href = _norm_href(h.get("href", ""))
+        key = href.lower()
+        if _allowed_url(href) and key not in seen:
             seen.add(key)
-            h["href"] = _norm_href(h.get("href", ""))
-            out.append(h)
+            out.append(dict(title=_clean_text(h.get("title", "")), href=href, body=_clean_text(h.get("body", ""))))
     return out
 
 # ----------------- Moteur via la lib DDGS -----------------
-def _search_web_ddg_lib(q: str, max_results: int, region: str) -> List[Dict[str, str]]:
+def _search_web_ddg_lib(q: str, max_results: int, region: str, timeout: float = DEFAULT_TIMEOUT) -> List[Dict[str, str]]:
     # Quelques DDG régionales utiles : "fr-fr", "en-us", "uk-en", "ng-en"...
     # safesearch: 'off'|'moderate'|'strict'
     tries = 2
     for _ in range(tries):
         try:
-            with DDGS() as ddgs:
+            with DDGS(timeout=timeout) as ddgs:
                 results = ddgs.text(
                     q,
                     region=region,
@@ -83,37 +133,55 @@ def _search_web_ddg_lib(q: str, max_results: int, region: str) -> List[Dict[str,
                 return _dedup_hits(out)[:max_results]
         except Exception:
             time.sleep(0.2)
-    return []
+    raise WebSearchError("Recherche DuckDuckGo indisponible (reseau, delai ou reponse invalide).") from None
 
 # ----------------- Fallback HTML (sans dépendance) -----------------
-def _search_web_ddg_html(q: str, max_results: int) -> List[Dict[str, str]]:
+def _search_web_ddg_html(q: str, max_results: int, timeout: float = DEFAULT_TIMEOUT) -> List[Dict[str, str]]:
     # Interface HTML simple et gratuite
     url = "https://html.duckduckgo.com/html/"
     try:
-        r = requests.post(url, data={"q": q}, headers=UA, timeout=DEFAULT_TIMEOUT)
+        r = requests.post(url, data={"q": q}, headers=UA, timeout=timeout)
         r.raise_for_status()
         html_text = r.text
     except Exception:
-        return []
+        raise WebSearchError("Recherche Web indisponible (HTTP, reseau ou delai depasse).") from None
 
-    # Selectors HTML basés sur la version "html" (léger mais sujet à variations)
-    titles = re.findall(r'<a[^>]+class="result__a"[^>]*>(.*?)</a>', html_text, flags=re.I | re.S)
-    hrefs  = re.findall(r'<a[^>]+class="result__a"[^>]*href="([^"]+)"', html_text, flags=re.I | re.S)
-    bodies = re.findall(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', html_text, flags=re.I | re.S)
+    class ResultsParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.hits = []
+            self.capture = None
+            self.depth = 0
 
-    hits: List[WebHit] = []
-    n = min(max_results, len(hrefs))
-    for i in range(n):
-        t = re.sub("<.*?>", "", titles[i] if i < len(titles) else "")
-        b = re.sub("<.*?>", "", bodies[i] if i < len(bodies) else "")
-        hit = WebHit(
-            title=_clean_text(t) or _clean_text(hrefs[i]),
-            href=_norm_href(hrefs[i]),
-            body=_clean_text(b),
-        )
-        hits.append(hit)
+        def handle_starttag(self, tag, attrs):
+            if tag in {"br", "img", "input", "hr", "meta", "link"}:
+                return
+            attrs = dict(attrs)
+            classes = attrs.get('class', '').split()
+            if self.capture:
+                self.depth += 1
+            elif tag == 'a' and 'result__a' in classes:
+                self.hits.append(dict(title='', href=_norm_href(attrs.get('href', '')), body=''))
+                self.capture, self.depth = 'title', 1
+            elif 'result__snippet' in classes and self.hits:
+                self.capture, self.depth = 'body', 1
 
-    return [h.__dict__ for h in _dedup_hits([h.__dict__ for h in hits])][:max_results]
+        def handle_endtag(self, tag):
+            if self.capture:
+                self.depth -= 1
+                if self.depth <= 0:
+                    self.capture = None
+
+        def handle_data(self, data):
+            if self.capture:
+                self.hits[-1][self.capture] += data
+
+    parser = ResultsParser()
+    try:
+        parser.feed(html_text)
+    except Exception:
+        raise WebSearchError("Reponse Web invalide.") from None
+    return _dedup_hits(parser.hits)[:max_results]
 
 # ----------------- API publique -----------------
 def search_web(query: str, max_results: int = 3, region: str = "fr-fr") -> List[Dict[str, str]]:
@@ -122,25 +190,46 @@ def search_web(query: str, max_results: int = 3, region: str = "fr-fr") -> List[
     Retour: liste de dicts {title, href, body}.
     Tente d'abord la lib officielle (si installée), sinon fallback HTML.
     """
+    config = web_configuration()
+    if not config['enabled']:
+        return []
     q = (query or "").strip()
     if not q:
         return []
+    if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 10:
+        raise ValueError("Nombre de resultats invalide (1-10).")
+    limit = min(max_results, config['max_results'])
+    out = []
     if _HAS_DDG:
         try:
-            out = _search_web_ddg_lib(q, max_results=max_results, region=region)
-            if out:
-                return out
-        except Exception:
+            out = _search_web_ddg_lib(q, max_results=limit, region=region, timeout=config['timeout'])
+        except WebSearchError:
             pass
-    # Fallback sans dépendances
-    return _search_web_ddg_html(q, max_results=max_results)
+    if not out:
+        out = _search_web_ddg_html(q, max_results=limit, timeout=config['timeout'])
+    return [hit for hit in _dedup_hits(out) if _allowed_url(hit['href'], config['domains'])][:limit]
+
 
 def fetch_and_clean(url: str, max_chars: int = 2800, timeout: float = DEFAULT_TIMEOUT) -> str:
     """
     Télécharge une page et renvoie un texte brut court (sans dépendances externes).
     """
+    config = web_configuration()
+    if not config['enabled'] or not _allowed_url(url, config['domains']):
+        return ""
+    timeout = min(float(timeout), config['timeout'])
     try:
-        r = requests.get(url, headers=UA, timeout=timeout)
+        # Check every redirect against the same domain policy before fetching it.
+        for _ in range(5):
+            r = requests.get(url, headers=UA, timeout=timeout, allow_redirects=False)
+            if not 300 <= r.status_code < 400:
+                break
+            from urllib.parse import urljoin
+            url = urljoin(url, r.headers.get("Location", ""))
+            if not _allowed_url(url, config['domains']):
+                return ""
+        else:
+            return ""
         r.raise_for_status()
         txt = r.text
     except Exception:

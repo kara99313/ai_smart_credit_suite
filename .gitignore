@@ -5,11 +5,14 @@
 
 # --- ENVIRONNEMENT & CLÉS ---
 .env
-!.env.example       # ← autorise la version publique .env.example
+.env.*
+!.env.example
 .env.local
 .env.*.backup
 *.key
 *.pem
+.streamlit/secrets.toml
+.aws/
 
 # --- FICHIERS TEMPORAIRES / CACHE ---
 __pycache__/
@@ -49,6 +52,7 @@ desktop.ini
 data/*.csv
 data/*.xlsx
 data/*.json
+data/*.jsonl
 data/*.parquet
 data/*.sav
 reports/*.pdf
@@ -64,9 +68,9 @@ model/*.h5
 model/*.onnx
 model/*.pt
 model/*.bin
-!model/logistic_pipeline_best.pkl       # ← autorisé (modèle principal)
-!model/features.pkl                     # ← autorisé si utilisé
-!model/explainer.pkl                    # ← autorisé si utilisé
+!model/logistic_pipeline_best.pkl
+!model/features.pkl
+!model/explainer.pkl
 
 # --- LOGS / MONITORING ---
 logs/
@@ -81,9 +85,6 @@ docs_rag/index/
 *.npz
 
 # --- DOCKER / BUILD ---
-Dockerfile
-docker-compose.yml
-.dockerignore
 build/
 dist/
 
@@ -97,3 +98,33 @@ dist/
 tmp/
 temp/
 .cache/
+
+# Phase 16: local-only resources and private histories (all nested formats).
+/data/
+/reports/
+/Microsoft/
+/audit/phase15_probe.txt
+secrets.toml
+*.p12
+*.pfx
+*.keystore
+.huggingface/
+.hf/
+huggingface/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# Redistribution rights pending; corpus installed separately.
+/docs_rag/*.pdf
+# Unused local training exports and alternative artifacts.
+/model/features*.csv
+/model/features*.json
+/model/features_smote.pkl
+/model/features_weighted.pkl
+/model/outputs/
+/model/save_explainer_linear.py
+/assets/logo.png
+
+/rag_builds/
