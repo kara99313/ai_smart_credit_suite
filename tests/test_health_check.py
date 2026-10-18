@@ -1,3 +1,4 @@
+from admin_auth_support import authenticated_admin_test
 from synthetic_history import SyntheticHistoryTestCase
 """Truthful, isolated probes; no provider calls or index builders on load."""
 import io
@@ -42,6 +43,7 @@ def button(app,label):
     return next(item for item in app.button if item.label==label)
 
 
+@authenticated_admin_test
 class DiagnosticsTests(SyntheticHistoryTestCase):
     def test_backend_health_reports_http_payload_and_loaded_not_inference(self):
         with patch.object(h.requests,'get',return_value=SimpleNamespace(status_code=200,json=lambda:{'status':'ok','model_loaded':True})) as get:
@@ -176,6 +178,7 @@ class DiagnosticsTests(SyntheticHistoryTestCase):
             self.assertEqual(result['state'],'Indisponible');self.assertIn('Aucun telechargement',result['explanation'])
 
 
+@authenticated_admin_test
 class HealthPageTests(SyntheticHistoryTestCase):
     def test_open_from_navigation_has_no_automatic_network_llm_or_index_load(self):
         with patch.object(h,'backend_check') as api,patch.object(h,'provider_check') as llm,patch.object(h,'index_check') as index,patch.object(h,'retrieval_check') as retrieval,patch.object(h,'inference_check') as inference,patch.object(h.requests,'get') as get:

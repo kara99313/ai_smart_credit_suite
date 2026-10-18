@@ -1,4 +1,5 @@
-﻿"""Phase 13: truthful Administration, local audit and read-only observability."""
+from admin_auth_support import authenticated_admin_test
+"""Phase 13: truthful Administration, local audit and read-only observability."""
 import csv
 import io
 import json
@@ -195,6 +196,7 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(len(frame),12);self.assertEqual(frame['event'].nunique(),12)
 
 
+@authenticated_admin_test
 class AdministrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)

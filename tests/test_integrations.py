@@ -1,4 +1,5 @@
-﻿"""Phase 12: active connectors, configuration and Streamlit boundaries."""
+from admin_auth_support import authenticated_admin_test
+"""Phase 12: active connectors, configuration and Streamlit boundaries."""
 import json
 import os
 import runpy
@@ -129,6 +130,7 @@ class WebIntegrationTests(unittest.TestCase):
             self.assertEqual(web.fetch_and_clean('https://example.org'),'Useful text')
 
 
+@authenticated_admin_test
 class AdminConfigurationTests(unittest.TestCase):
     def test_saved_configuration_applies_to_running_process(self):
         with tempfile.TemporaryDirectory() as directory,patch.dict(os.environ,{},clear=False):
@@ -163,6 +165,7 @@ class AdminConfigurationTests(unittest.TestCase):
         self.assertEqual(content.count('LLM_PROVIDER='),1);self.assertEqual(dotenv_values(stream=__import__('io').StringIO(content))['OTHER'],'x')
 
 
+@authenticated_admin_test
 class IntegrationPageTests(unittest.TestCase):
     def setUp(self):
         original = web.get_setting

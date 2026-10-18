@@ -1,6 +1,7 @@
 """Explicit, isolated, read-only health probes; never build an index on page load."""
 from pathlib import Path
 import streamlit as st
+from utils.admin_auth import is_admin
 from utils.runtime_config import ROOT, backend_url
 from utils import health_diagnostics as checks
 
@@ -57,8 +58,10 @@ def main():
     inventory=checks.provider_inventory()
     st.dataframe(inventory,hide_index=True,width='stretch')
     st.caption('Groq, OpenAI et Ollama sont supportes. Une cle presente ou un connecteur installe ne prouve pas une reponse. Un test ci-dessous peut consommer un petit quota (budget minimal de 8 tokens (128 pour les modeles a raisonnement), sans retry).')
+    if not is_admin():
+        st.caption('Connexion administrateur requise dans Administration pour tester un fournisseur.')
     provider=st.selectbox('Fournisseur a tester',list(checks.PROVIDERS))
-    if st.button('Tester le fournisseur selectionne (appel reel)'):
+    if st.button('Tester le fournisseur selectionne (appel reel)', disabled=not is_admin()):
         state['llm_'+provider]=checks.provider_check(provider)
     for item in inventory:
         name=item['provider']

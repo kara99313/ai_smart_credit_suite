@@ -100,6 +100,10 @@ def provider_inventory():
     return rows
 
 
+from utils.admin_auth import sensitive
+
+
+@sensitive
 def provider_check(name):
     if name not in PROVIDERS:
         return result('Indisponible','Fournisseur non supporte.')

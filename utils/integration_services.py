@@ -41,6 +41,10 @@ def _set_env_var(content, key, value):
     return '\n'.join(lines) + '\n'
 
 
+from utils.admin_auth import sensitive
+
+
+@sensitive
 def save_llm_configuration(provider, model, api_key='', base_url='', path=None):
     if provider not in PROVIDERS:
         raise ValueError('Fournisseur non supporte.')

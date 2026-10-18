@@ -3,6 +3,7 @@ from __future__ import annotations
 import streamlit as st
 import hashlib
 from datetime import datetime, timezone
+from utils.admin_auth import render_gate, require_admin, sensitive
 from utils import audit
 from utils.admin_diagnostics import configuration_snapshot, configuration_files
 from utils.llm_runtime import PROVIDERS, get_setting, select_provider, explain
@@ -13,13 +14,20 @@ from utils.integration_services import save_llm_configuration, effective_llm_ide
 
 def _record_action(event, details):
     try:
-        audit.append_audit(event, details=details)
+        audit.append_audit(event, actor=require_admin(), details=details)
         return True
     except Exception:
         st.warning('Journal audit indisponible ; cette action n est pas confirmee dans le journal.')
         return False
 
+@sensitive
+def test_admin_llm(prompt):
+    return simple_chat(prompt)
+
+
 def main():
+    if not render_gate():
+        return
     st.markdown('## Administration — Configuration LLM')
     try:
         current = select_provider()
@@ -68,7 +76,6 @@ def main():
     st.dataframe(snapshot['rows'], hide_index=True)
     st.dataframe(configuration_files(), hide_index=True)
     st.caption('Les valeurs de repli sont des parametres du code, pas des observations du service. YAML et preferences JSON ne pilotent pas le client LLM partage ; la table ci-dessus expose ses sources effectives.')
-    st.caption('Cette application ne verifie aucune identite administrateur. Les actions sont journalisees comme session_non_authentifiee ; aucun controle d acces n est ajoute par ce formulaire.')
     st.subheader('Test du fournisseur effectif')
     st.caption('Le test utilise la configuration appliquee, pas les modifications non enregistrees. Il peut consommer du quota.')
     identity = effective_llm_identity()
@@ -84,7 +91,7 @@ def main():
         else:
             checked = datetime.now(timezone.utc).isoformat(timespec='seconds')
             try:
-                output = simple_chat(prompt)
+                output = test_admin_llm(prompt)
                 st.session_state['admin_llm_test'] = (identity, True, audit.redact_details(output), checked, prompt_identity)
                 _record_action('test_llm_termine', {'provider_effectif': snapshot['provider'], 'succes': True})
             except Exception as error:

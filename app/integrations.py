@@ -1,6 +1,7 @@
 # app/integrations.py
 from __future__ import annotations
 import streamlit as st
+from utils.admin_auth import is_admin
 from utils.api_client import predict_credit_api
 from utils import health_diagnostics as checks
 from utils.runtime_config import backend_url
@@ -173,9 +174,11 @@ def _llm_tab():
         current = 'groq'
         st.warning('Configuration fournisseur invalide.')
     names = list(checks.PROVIDERS)
+    if not is_admin():
+        st.caption('Connexion administrateur requise dans Administration pour tester un fournisseur.')
     provider = st.selectbox('Fournisseur a tester', names, index=names.index(current))
     identity = (provider, effective_llm_identity())
-    if st.button('Tester le fournisseur (appel reel)'):
+    if st.button('Tester le fournisseur (appel reel)', disabled=not is_admin()):
         st.session_state['integration_llm_test'] = (identity, checks.provider_check(provider))
     st.caption('Test explicite avec budget minimal ; peut consommer du quota. Les erreurs ne declenchent aucun basculement vers un autre fournisseur.')
     previous = st.session_state.get('integration_llm_test')
