@@ -15,6 +15,7 @@ import requests
 _HAS_DDG = True
 try:
     from duckduckgo_search import DDGS  # pip install duckduckgo-search
+    from duckduckgo_search.exceptions import RatelimitException, TimeoutException
 except Exception:
     _HAS_DDG = False
 
@@ -23,6 +24,49 @@ DEFAULT_TIMEOUT = 10.0
 
 class WebSearchError(RuntimeError):
     """Safe connector error; never include response bodies or credentials."""
+
+
+class WebSearchRateLimitError(WebSearchError):
+    """The provider refused automated requests."""
+
+
+class WebSearchResults(list):
+    """List compatible with agents, with safe provider metadata."""
+    def __init__(self, hits, provider):
+        super().__init__(hits)
+        self.provider = provider
+
+
+def _search_web_tavily(q, max_results, timeout, domains, api_key):
+    try:
+        response = requests.post(
+            "https://api.tavily.com/search",
+            headers={"Authorization": "Bearer " + api_key},
+            json=dict(query=q, max_results=max_results, search_depth="basic",
+                      include_domains=domains, include_answer=False, include_raw_content=False),
+            timeout=timeout, allow_redirects=False,
+        )
+        if response.status_code in (401, 403):
+            raise WebSearchError("Tavily indisponible : authentification ou droits refuses.")
+        if response.status_code in (429, 432, 433):
+            raise WebSearchError("Tavily indisponible : quota ou limite de requetes atteint.")
+        if not 200 <= response.status_code < 300:
+            raise WebSearchError("Tavily indisponible : erreur HTTP.")
+        payload = response.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get('results'), list):
+            raise WebSearchError("Tavily indisponible : reponse invalide.")
+        hits = []
+        for item in payload['results']:
+            if not isinstance(item, dict) or not all(isinstance(item.get(k), str) for k in ('title', 'url', 'content')):
+                raise WebSearchError("Tavily indisponible : resultat invalide.")
+            hits.append(dict(title=item['title'], href=item['url'], body=item['content']))
+        return _dedup_hits(hits)
+    except WebSearchError:
+        raise
+    except requests.Timeout:
+        raise WebSearchError("Tavily indisponible : delai depasse.") from None
+    except Exception:
+        raise WebSearchError("Tavily indisponible : reseau ou reponse invalide.") from None
 
 
 def normalize_domains(domains):
@@ -112,27 +156,30 @@ def _dedup_hits(hits: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
 def _search_web_ddg_lib(q: str, max_results: int, region: str, timeout: float = DEFAULT_TIMEOUT) -> List[Dict[str, str]]:
     # Quelques DDG régionales utiles : "fr-fr", "en-us", "uk-en", "ng-en"...
     # safesearch: 'off'|'moderate'|'strict'
-    tries = 2
-    for _ in range(tries):
-        try:
-            with DDGS(timeout=timeout) as ddgs:
-                results = ddgs.text(
-                    q,
-                    region=region,
-                    safesearch="moderate",
-                    timelimit="y",            # 1 an ; réduit un peu le bruit
-                    max_results=max_results,
-                )
-                out: List[Dict[str, str]] = []
-                for r in results or []:
-                    out.append({
-                        "title": _clean_text((r.get("title") or "")),
-                        "href": _norm_href(r.get("href") or ""),
-                        "body": _clean_text((r.get("body") or "")),
-                    })
-                return _dedup_hits(out)[:max_results]
-        except Exception:
-            time.sleep(0.2)
+    try:
+        with DDGS(timeout=timeout) as ddgs:
+            results = ddgs.text(
+                q,
+                region=region,
+                safesearch="moderate",
+                timelimit="y",            # 1 an ; réduit un peu le bruit
+                max_results=max_results,
+            )
+            out: List[Dict[str, str]] = []
+            for r in results or []:
+                out.append({
+                    "title": _clean_text((r.get("title") or "")),
+                    "href": _norm_href(r.get("href") or ""),
+                    "body": _clean_text((r.get("body") or "")),
+                })
+            return _dedup_hits(out)[:max_results]
+    except RatelimitException:
+        raise WebSearchRateLimitError("Recherche DuckDuckGo limitee (rate limit). Reessayer plus tard.") from None
+    except TimeoutException:
+        raise WebSearchError("Recherche DuckDuckGo indisponible (delai depasse).") from None
+    except Exception as exc:
+        if "10013" in str(exc):
+            raise WebSearchError("Connexion DuckDuckGo bloquee par les permissions reseau (WinError 10013).") from None
     raise WebSearchError("Recherche DuckDuckGo indisponible (reseau, delai ou reponse invalide).") from None
 
 # ----------------- Fallback HTML (sans dépendance) -----------------
@@ -141,9 +188,19 @@ def _search_web_ddg_html(q: str, max_results: int, timeout: float = DEFAULT_TIME
     url = "https://html.duckduckgo.com/html/"
     try:
         r = requests.post(url, data={"q": q}, headers=UA, timeout=timeout)
+        if r.status_code in (202, 403, 429):
+            raise WebSearchRateLimitError("Recherche DuckDuckGo limitee ou bloquee (rate limit / anti-bot). Reessayer plus tard.")
         r.raise_for_status()
         html_text = r.text
-    except Exception:
+        if any(marker in html_text.lower() for marker in ('anomaly.js', 'anomaly-modal', 'challenge-form')):
+            raise WebSearchRateLimitError("Recherche DuckDuckGo bloquee par une verification anti-bot. Reessayer plus tard.")
+    except WebSearchError:
+        raise
+    except requests.Timeout:
+        raise WebSearchError("Recherche Web indisponible (delai depasse).") from None
+    except Exception as exc:
+        if "10013" in str(exc):
+            raise WebSearchError("Connexion Web bloquee par les permissions reseau (WinError 10013).") from None
         raise WebSearchError("Recherche Web indisponible (HTTP, reseau ou delai depasse).") from None
 
     class ResultsParser(HTMLParser):
@@ -181,12 +238,14 @@ def _search_web_ddg_html(q: str, max_results: int, timeout: float = DEFAULT_TIME
         parser.feed(html_text)
     except Exception:
         raise WebSearchError("Reponse Web invalide.") from None
+    if not parser.hits and not re.search(r'no-results|no results', html_text, re.IGNORECASE):
+        raise WebSearchError("Reponse DuckDuckGo non reconnue ; recherche non confirmee.")
     return _dedup_hits(parser.hits)[:max_results]
 
 # ----------------- API publique -----------------
 def search_web(query: str, max_results: int = 3, region: str = "fr-fr") -> List[Dict[str, str]]:
     """
-    Recherche DuckDuckGo.
+    Recherche Tavily puis DuckDuckGo en cas d indisponibilite.
     Retour: liste de dicts {title, href, body}.
     Tente d'abord la lib officielle (si installée), sinon fallback HTML.
     """
@@ -199,15 +258,30 @@ def search_web(query: str, max_results: int = 3, region: str = "fr-fr") -> List[
     if isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 10:
         raise ValueError("Nombre de resultats invalide (1-10).")
     limit = min(max_results, config['max_results'])
+    tavily_error = None
+    api_key = get_setting('TAVILY_API_KEY', '').strip()
+    if api_key:
+        try:
+            hits = _search_web_tavily(q, limit, config['timeout'], config['domains'], api_key)
+            return WebSearchResults([hit for hit in hits if _allowed_url(hit['href'], config['domains'])][:limit], 'Tavily')
+        except WebSearchError as exc:
+            tavily_error = exc
     out = []
+    library_error = None
     if _HAS_DDG:
         try:
             out = _search_web_ddg_lib(q, max_results=limit, region=region, timeout=config['timeout'])
-        except WebSearchError:
-            pass
+        except WebSearchError as exc:
+            library_error = exc
     if not out:
-        out = _search_web_ddg_html(q, max_results=limit, timeout=config['timeout'])
-    return [hit for hit in _dedup_hits(out) if _allowed_url(hit['href'], config['domains'])][:limit]
+        try:
+            out = _search_web_ddg_html(q, max_results=limit, timeout=config['timeout'])
+        except WebSearchError as exc:
+            prefix = f"{tavily_error} Repli DuckDuckGo : " if tavily_error else ""
+            if library_error:
+                raise WebSearchError(f"{prefix}{library_error} Repli HTML : {exc}") from None
+            raise WebSearchError(f"{prefix}{exc}") from None
+    return WebSearchResults([hit for hit in _dedup_hits(out) if _allowed_url(hit['href'], config['domains'])][:limit], 'DuckDuckGo')
 
 
 def fetch_and_clean(url: str, max_chars: int = 2800, timeout: float = DEFAULT_TIMEOUT) -> str:

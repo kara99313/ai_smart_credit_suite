@@ -63,6 +63,12 @@ class SettingsIntegrationTests(unittest.TestCase):
 
 
 class WebIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        original = web.get_setting
+        patcher = patch.object(web, 'get_setting', side_effect=lambda name, default='': '' if name == 'TAVILY_API_KEY' else original(name, default))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_effective_environment_overrides_preferences(self):
         cfg=settings.AppSettings(enable_web_search=False,allowed_domains=['old.org'],web_search_max=2)
         env={'WEB_SEARCH_ENABLED':'true','WEB_ALLOWED_DOMAINS':'EXAMPLE.ORG, bis.org','WEB_TIMEOUT':'2.5'}
@@ -159,6 +165,10 @@ class AdminConfigurationTests(unittest.TestCase):
 
 class IntegrationPageTests(unittest.TestCase):
     def setUp(self):
+        original = web.get_setting
+        patcher = patch.object(web, 'get_setting', side_effect=lambda name, default='': '' if name == 'TAVILY_API_KEY' else original(name, default))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         # Administration now records actions. Isolate its new audit side effect.
         self.audit_temp=tempfile.TemporaryDirectory()
         self.audit_patch=patch('utils.audit.AUDIT_PATH',Path(self.audit_temp.name)/'audit.csv')

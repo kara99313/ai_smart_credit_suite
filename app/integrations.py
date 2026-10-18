@@ -111,9 +111,9 @@ def _api_tab():
 # -------------- Web tab -----------------
 
 def _web_tab():
-    from utils.web_search import web_configuration, normalize_domains, search_web
-    st.subheader('Recherche Web - DuckDuckGo')
-    st.caption('Connecteur sans cle API, via la bibliotheque DuckDuckGo ou le repli HTML. SERPAPI : non implemente ; aucune cle SERPAPI n est utilisee.')
+    from utils.web_search import web_configuration, normalize_domains, search_web, WebSearchError
+    st.subheader('Recherche Web - Tavily / DuckDuckGo')
+    st.caption('Tavily est prioritaire si TAVILY_API_KEY est configuree. DuckDuckGo prend le relais en cas d absence ou d indisponibilite de Tavily.')
     try:
         cfg = get_settings()
         effective = web_configuration()
@@ -146,6 +146,11 @@ def _web_tab():
         try:
             hits = search_web(query, max_results=2)
             result = ('Resultats Web recus.' if hits else 'Aucun resultat exploitable apres filtrage ; fonctionnement non confirme.', hits)
+            provider = getattr(hits, 'provider', None)
+            if provider:
+                result = (result[0] + f' Fournisseur : {provider}.', hits)
+        except WebSearchError as error:
+            result = (f'Recherche Web indisponible : {error}', [])
         except Exception:
             result = ('Recherche Web indisponible : erreur reseau, HTTP, timeout ou reponse invalide.', [])
         st.session_state['integration_web_test'] = (identity, result)
