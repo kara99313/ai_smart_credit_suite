@@ -43,9 +43,8 @@ Pillow==10.4.0   # ← requis stable pour ReportLab/Matplotlib (images/PNG)
 # =========================================================
 #  LLM / RAG / AGENTS
 # =========================================================
-# PyTorch (Windows)
-torch==2.2.2 ; platform_system == "Windows"
-torchvision==0.17.2 ; platform_system == "Windows"
+# PyTorch (CPU Linux wheel installed first in infra/Dockerfile)
+torch==2.2.2
 
 # Transformers et accélération
 transformers==4.41.1

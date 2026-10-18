@@ -7,6 +7,8 @@ Compatible LangChain 0.3.x et Groq / OpenAI / Ollama.
 """
 from __future__ import annotations
 import os, sys, json, base64
+from utils.llm_runtime import explain
+from utils.api_client import _validate_prediction_response
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Tuple
 
@@ -93,7 +95,9 @@ def predict_credit_tool(payload_json: str) -> str:
     except Exception:
         return _utf8("Format JSON invalide pour predict_credit (vérifie les guillemets).")
     try:
-        res = predict_credit_api(payload, timeout=30.0)
+        if not isinstance(payload, dict) or not payload:
+            return "ERROR: Objet JSON client non vide requis."
+        res = _validate_prediction_response(predict_credit_api(payload, timeout=30.0))
         pdv = float(res.get("pd", 0.0))
         score = int(res.get("score_1000", 0))
         rating = str(res.get("rating", "N/A"))
@@ -106,7 +110,7 @@ def predict_credit_tool(payload_json: str) -> str:
             f"• Décision = {decision}"
         )
     except Exception as e:
-        return _utf8(f"❌ Échec d'appel /api/predict : {e}")
+        return _utf8(f"❌ Échec d'appel /api/predict : {explain(e)}")
 
 def rag_retrieve_tool(query: str, mode: str = "docs", k: int = 3, max_chars: int = 500) -> str:
     """Recherche sémantique interne (RAG) dans FAISS/Hybride."""
@@ -124,14 +128,14 @@ def rag_retrieve_tool(query: str, mode: str = "docs", k: int = 3, max_chars: int
         for i, d in enumerate(hits, 1):
             src = _utf8(d.metadata.get("source", "inconnu"))
             page = d.metadata.get("page")
-            page_txt = f" (page {page})" if page else ""
+            page_txt = f" (page {page})" if page is not None else ""
             txt = _utf8(d.page_content or "").replace("\n", " ")
             if len(txt) > max_chars:
                 txt = txt[:max_chars] + "…"
             parts.append(f"[D{i}] {src}{page_txt}\n{txt}")
         return _utf8("\n\n".join(parts))
     except Exception as e:
-        return _utf8(f"⚠️ RAG indisponible : {e}")
+        return _utf8(f"⚠️ RAG indisponible : {explain(e)}")
 
 def tool_web_search(query: str, k: int = 3, fetch: bool = False, max_chars: int = 900) -> str:
     """Recherche Web (DuckDuckGo)."""
@@ -142,56 +146,27 @@ def tool_web_search(query: str, k: int = 3, fetch: bool = False, max_chars: int 
         ctx = build_web_context(hits, max_chars_total=max_chars, fetch_full=bool(fetch))
         return _utf8(ctx or "Aucun extrait Web exploitable.")
     except Exception as e:
-        return _utf8(f"⚠️ Recherche Web indisponible : {e}")
+        return _utf8(f"⚠️ Recherche Web indisponible : {explain(e)}")
 
 def generate_report_tool(ctx_json: str | None = None, max_chars: int = 1200) -> str:
-    """
-    Génère un mini-rapport HTML à partir d’un contexte (ou du dernier log si None).
-    ATTENTION: ne pas dépasser max_chars (tronqué proprement).
+    """Rapport HTML complet depuis les archives ; ctx_json choisit client_id.
+
+    Les valeurs de scoring proposees par le modele ne sont jamais utilisees.
+    max_chars reste accepte pour compatibilite ; aucun HTML tronque.
     """
     try:
-        ctx = _ctx_from_last_log() if not ctx_json else json.loads(ctx_json or "{}")
+        request = json.loads(ctx_json) if ctx_json else {}
+        if not isinstance(request, dict):
+            raise ValueError()
+        row = load_client_record(request.get("client_id") or None)
+        if row is None:
+            return "ERROR: Aucun resultat archive pour ce client ; rapport indisponible."
+        from utils.report_generator import render_html_report
+        ctx = dict(row, pd_value=row.get("prob_default"))
+        return render_html_report(ctx)
     except Exception:
-        return _utf8("<p>❌ Contexte JSON invalide pour le rapport.</p>")
+        return "ERROR: Contexte archive absent ou invalide ; rapport indisponible."
 
-    client_id = _utf8(ctx.get("client_id", "N/A"))
-    ts = _utf8(ctx.get("timestamp") or datetime.now(timezone.utc).isoformat())
-    pdv = float(ctx.get("pd_value", 0.0))
-    thr = float(ctx.get("threshold", 0.1))
-    model_tag = _utf8(ctx.get("model_tag", "pipeline_v1"))
-    logo = _utf8(ctx.get("logo_path") or "")
-
-    inputs_raw = ctx.get("inputs_json", "{}")
-    try:
-        _obj = json.loads(inputs_raw)
-        pretty_inputs = json.dumps(_obj, ensure_ascii=False, indent=2)
-    except Exception:
-        pretty_inputs = _utf8(inputs_raw)
-
-    html = f"""
-    <html>
-      <head><meta charset="utf-8"><title>Rapport crédit — {client_id}</title></head>
-      <body style="font-family:Arial, sans-serif; margin:24px;">
-        <div style="display:flex; align-items:center; gap:12px;">
-          {'<img src="'+logo+'" style="height:48px;">' if logo else ''}
-          <h2>Rapport de scoring crédit</h2>
-        </div>
-        <p><b>Client :</b> {client_id} &nbsp;|&nbsp; <b>Date :</b> {ts} &nbsp;|&nbsp; <b>Modèle :</b> {model_tag}</p>
-        <hr>
-        <h3>Résultat</h3>
-        <ul>
-          <li>Probabilité de défaut (PD) : {pdv:.2%}</li>
-          <li>Seuil de décision : {thr:.2%}</li>
-          <li>Décision : {"✅ ACCEPT" if pdv < thr else "❌ REVIEW/REJECT"}</li>
-        </ul>
-        <h3>Entrées du client</h3>
-        <pre style="white-space:pre-wrap;background:#f7fafc;padding:12px;border-radius:8px;">{pretty_inputs}</pre>
-        <p style="color:#64748b; font-size:12px;">Rapport généré automatiquement — usage interne.</p>
-      </body>
-    </html>
-    """.strip()
-
-    return _utf8(html[:max_chars] + "…") if len(html) > max_chars else _utf8(html)
 
 def now_tool(fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
     """Renvoie l'heure UTC actuelle formatée."""

@@ -9,10 +9,10 @@ import pandas as pd
 import streamlit as st
 
 from utils.api_client import predict_credit_api, explain_credit_api, ApiError
-from utils.explanations import heuristic_narrative, build_narrative_from_contrib
 from utils.report_generator import build_report_context, render_html_report
 from utils.reporting_pdf import build_pdf_bytes
 from utils.settings import get_settings
+from utils.prediction_logs import append_prediction_record, ensure_prediction_log
 
 # ====== Chemins / log ======
 PROJECT_ROOT = os.getcwd()
@@ -20,11 +20,8 @@ DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 REPORTS_DIR = os.path.join(PROJECT_ROOT, "reports")
 LOG_PATH = os.path.join(DATA_DIR, "predictions_log.csv")
 LOG_HEADER = ["timestamp","client_id","prob_default","pred_label","threshold","inputs_json","model_tag","rating","decision"]
-os.makedirs(DATA_DIR, exist_ok=True)
+ensure_prediction_log(LOG_PATH)
 os.makedirs(REPORTS_DIR, exist_ok=True)
-if not os.path.exists(LOG_PATH):
-    with open(LOG_PATH, "w", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow(LOG_HEADER)
 
 # ====== Libellés FR/EN ======
 DISPLAY_NAMES = {
@@ -171,7 +168,7 @@ def rating_to_risk_level(rating: str) -> str:
              "BB":"Élevé","B":"Très élevé","CCC":"Critique","CC":"Critique","C":"Critique","D":"Défaut imminent"}
     return table.get(rating, "Inconnu")
 
-def append_log(client_id: str, pd_val: float, label: int, threshold: float, inputs: dict, model_tag: str, rating: str, decision: str):
+def append_log(client_id: str, pd_val: float, label: int, threshold: float, inputs: dict, model_tag: str, rating: str, decision: str, *, scoring_result=None):
     new_row = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "client_id": client_id,
@@ -183,44 +180,23 @@ def append_log(client_id: str, pd_val: float, label: int, threshold: float, inpu
         "rating": rating,
         "decision": decision,
     }
-    exists = os.path.exists(LOG_PATH)
-    with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
-        pd.DataFrame([new_row]).to_csv(f, header=not exists, index=False)
+    return append_prediction_record(LOG_PATH, new_row, scoring_result=scoring_result)
 
 # ====== Explicabilité — helpers ======
 def _parse_explain(exp_res: Dict[str, Any], inputs: Dict[str, Any]) -> Tuple[pd.DataFrame, str]:
-    """Normalise /tools/explain -> DataFrame."""
-    method = str(exp_res.get("method", "unknown"))
-    items: List[Dict[str, Any]] = exp_res.get("items") or []
-    raw_contrib = {}
-    for it in items:
-        feat = str(it.get("feature"))
-        if "contribution" in it:
-            raw_contrib[feat] = float(it.get("contribution", 0.0))
-        elif "importance" in it:
-            raw_contrib[feat] = float(it.get("importance", 0.0))
-    for k in inputs.keys():
-        raw_contrib.setdefault(k, 0.0)
-    df = pd.DataFrame({"feature": list(raw_contrib.keys()), "contribution": list(raw_contrib.values())})
-    df["value"] = df["feature"].map(lambda f: inputs.get(f))
-    df["abs_contribution"] = df["contribution"].abs()
-    df["sign"] = df["contribution"].map(lambda v: "+" if v >= 0 else "−")
-    df = df.sort_values("abs_contribution", ascending=False).reset_index(drop=True)  # <-- fix
-    df["rank"] = df.index + 1
-    return df, method
+    """Keep global coefficient importance separate from individual contributions."""
+    if exp_res.get("scope") != "global" or exp_res.get("method") != "global_importance":
+        raise ValueError("Unsupported explanation scope.")
+    items = exp_res.get("items") or []
+    if not items or any("contribution" in item for item in items):
+        raise ValueError("Global importance cannot contain individual contributions.")
+    frame = pd.DataFrame(items)[["feature", "coefficient", "importance"]]
+    if not np.isfinite(frame[["coefficient", "importance"]].to_numpy(dtype=float)).all():
+        raise ValueError("Non-finite explanation data.")
+    if not np.allclose(frame["importance"], frame["coefficient"].abs(), rtol=1e-12, atol=1e-12):
+        raise ValueError("Invalid global importance.")
+    return frame.sort_values("importance", ascending=False).reset_index(drop=True), "global_importance"
 
-def _waterfall_plot(df_top: pd.DataFrame, title: str = "Décomposition relative des contributions"):
-    try:
-        import plotly.graph_objects as go
-    except Exception:
-        return None
-    top = df_top.copy().sort_values("contribution", ascending=True)
-    measure = ["relative"] * len(top)
-    x = [f"{r.feature}" for _, r in top.iterrows()]
-    y = [float(r.contribution) for _, r in top.iterrows()]
-    fig = go.Figure(go.Waterfall(orientation="v", measure=measure, x=x, text=[f"{v:+.3f}" for v in y], y=y, connector={"line":{"dash":"dot"}}))
-    fig.update_layout(title=title, showlegend=False, height=420, margin=dict(l=10,r=10,t=50,b=20))
-    return fig
 
 def _download_bytes(df: pd.DataFrame, as_json: bool = False) -> bytes:
     if as_json:
@@ -243,7 +219,7 @@ def main():
         st.markdown("#### Paramètres décisionnels")
         threshold = st.slider("Seuil décisionnel interne (PD)", 0.01, 0.50, 0.10, 0.01)
         client_id = st.text_input("Identifiant client", "CLI-0001")
-        use_api_explain = st.toggle("Explication avancée (SHAP si disponible)", value=True)
+        use_api_explain = st.toggle("Afficher les importances globales du modèle", value=True)
         run = st.button("⚡ Lancer la prédiction", type="primary", use_container_width=True)
 
     st.markdown("---")
@@ -261,121 +237,61 @@ def main():
         except ApiError as e:
             st.error(str(e)); return
 
-        pd_val = float(res.get("pd", 0.5))
-        score_1000 = int(res.get("score_1000", int(round((1 - pd_val) * 1000))))
-        rating = str(res.get("rating", "N/A"))
-        decision = str(res.get("decision", "N/A"))
-        risk_level = rating_to_risk_level(rating)
+        pd_val = float(res["pd"])
+        threshold = float(res["threshold"])
+        score_1000 = int(res["score_1000"])
+        rating = str(res["rating"])
+        decision = str(res["decision"])
+        risk_level = str(res.get("risk_level") or rating_to_risk_level(rating))
         model_tag = str(res.get("model_tag", "pipeline_v1"))
 
         kpi_cards(pd_val, score_1000, rating, risk_level, decision)
         gauge_row(pd_val, score_1000, threshold)
 
         label_bin = 1 if pd_val >= threshold else 0
-        append_log(client_id, pd_val, label_bin, threshold, inputs, model_tag, rating, decision)
+        archived = append_log(client_id, pd_val, label_bin, threshold, inputs, model_tag, rating, decision,
+                              scoring_result={**res, "risk_level": risk_level})
 
-        # 2) Explicabilité détaillée
-        st.markdown("### Explicabilité détaillée")
+        # 2) Global explanation: no signed attribution or individual waterfall.
+        st.markdown("### Explicabilité du modèle")
+        # Only validated individual contributions could be passed to the report component.
+        # Global importances must never enter its contribution-shaped dataframe.
         df_exp: pd.DataFrame | None = None
-        method = "none"
-
+        global_frame: pd.DataFrame | None = None
         if use_api_explain:
-            exp_res = explain_credit_api(dict(inputs), top_k=30)
-            if exp_res and exp_res.get("ok"):
-                df_exp, method = _parse_explain(exp_res, inputs)
-
-        if df_exp is None:
-            nar = heuristic_narrative(pd_val, threshold, pd.Series(inputs))
-            tabs = st.tabs(["Client", "Analyste", "Admin", "Technique"])
-            with tabs[0]: st.markdown(nar.client)
-            with tabs[1]: st.markdown(nar.analyst)
-            with tabs[2]: st.markdown(nar.admin)
-            with tabs[3]:
-                st.info("Aucune décomposition fine disponible depuis le modèle. Fallback heuristique affiché.")
-        else:
-            topN = st.slider("Nombre de facteurs à détailler (Top absolu)", 5, 30, 15, 1)
-            df_top = df_exp.sort_values("abs_contribution", ascending=False).head(int(topN))
-
-            cA, cB = st.columns([3,2])
-            with cA:
-                st.subheader("Bar chart — Importance absolue")
+            explanation = explain_credit_api(dict(inputs), top_k=30, allow_global=True, prediction=res)
+            if explanation is not None:
                 try:
-                    st.bar_chart(df_top.set_index("feature")["abs_contribution"])
-                except Exception:
-                    st.write(df_top[["feature","abs_contribution"]])
-
-            with cB:
-                st.subheader("Top positifs / négatifs")
-                pos = df_top[df_top["contribution"] > 0].sort_values("contribution", ascending=False).head(5)
-                neg = df_top[df_top["contribution"] < 0].sort_values("contribution", ascending=True).head(5)
-                st.markdown("**Augmentent la PD (risque) :**")
-                if len(pos):
-                    for _, r in pos.iterrows():
-                        st.write(f"- **{r.feature}** → +{r.contribution:.4f} (valeur : `{r.value}`)")
-                else:
-                    st.write("_aucun contributeur positif dominant_")
-                st.markdown("**Réduisent la PD (protection) :**")
-                if len(neg):
-                    for _, r in neg.iterrows():
-                        st.write(f"- **{r.feature}** → {r.contribution:.4f} (valeur : `{r.value}`)")
-                else:
-                    st.write("_aucun contributeur négatif dominant_")
-
-            st.subheader("Waterfall — décomposition relative (top absolu)")
-            fig = _waterfall_plot(df_top.head(10))
-            if fig is not None:
-                st.plotly_chart(fig, use_container_width=True)
+                    global_frame, _ = _parse_explain(explanation, inputs)
+                except (ValueError, KeyError, TypeError):
+                    global_frame = None
+            if global_frame is None:
+                st.warning("Aucune explication fiable disponible pour cette prédiction. Aucun facteur individuel n'est déduit.")
             else:
-                st.info("Waterfall indisponible (Plotly non installé).")
-
-            try:
-                contrib_series = pd.Series(df_exp.set_index("feature")["contribution"].to_dict(), dtype=float)
-                nar = build_narrative_from_contrib(
-                    pd_val=pd_val, threshold=threshold, contrib=contrib_series, X_row=pd.Series(inputs),
-                )
-                tabs = st.tabs(["Client", "Analyste", "Admin", "Technique"])
-                with tabs[0]: st.markdown(nar.client)
-                with tabs[1]: st.markdown(nar.analyst)
-                with tabs[2]: st.markdown(nar.admin)
-                with tabs[3]:
-                    st.markdown(
-                        "- Méthode d’explication : **{}**  \n"
-                        "- Nombre de facteurs utilisés : **{}**  \n"
-                        "- Seuil décisionnel interne : **{:.2%}**  \n"
-                        "- PD prédite : **{:.2%}**"
-                        .format("SHAP" if method=="shap" else "Fallback (coefficients/variance)",
-                                len(df_exp), threshold, pd_val)
-                    )
-            except Exception:
-                pass
-
-        # 3) Export explications
-        st.markdown("#### Export des explications")
-        cdl1, cdl2 = st.columns(2)
-        if use_api_explain and df_exp is not None:
-            with cdl1:
-                st.download_button(
-                    "📥 Contributions (CSV)",
-                    data=_download_bytes(df_exp, as_json=False),
-                    file_name=f"explanations_{client_id}.csv",
-                    mime="text/csv",
-                    use_container_width=True
-                )
-            with cdl2:
-                st.download_button(
-                    "📥 Contributions (JSON)",
-                    data=_download_bytes(df_exp, as_json=True),
-                    file_name=f"explanations_{client_id}.json",
-                    mime="application/json",
-                    use_container_width=True
-                )
+                st.subheader("Importance globale du modèle")
+                st.info("Repli explicite : SHAP individuel non validé. Les valeurs sont les coefficients absolus du logit dans l'espace transformé (variables numériques standardisées et catégories encodées). Elles ne justifient pas individuellement cette décision.")
+                st.bar_chart(global_frame.set_index("feature")["importance"])
+                st.dataframe(global_frame, use_container_width=True, hide_index=True)
+                st.caption("Classe expliquée : 1. Modèle et entrées normalisées vérifiés par rapport à la prédiction.")
+                st.markdown("#### Export des importances globales")
+                cdl1, cdl2 = st.columns(2)
+                with cdl1:
+                    st.download_button("Importances globales (CSV)",
+                        data=_download_bytes(global_frame), file_name=f"global_importance_{client_id}.csv",
+                        mime="text/csv", use_container_width=True)
+                with cdl2:
+                    st.download_button("Importances globales (JSON)",
+                        data=_download_bytes(global_frame, as_json=True), file_name=f"global_importance_{client_id}.json",
+                        mime="application/json", use_container_width=True)
+        else:
+            st.caption("Explication désactivée. Aucun facteur individuel n'est déduit.")
 
         # 4) Rapports — HTML & PDF
         st.markdown("### Génération de rapports (CA / Administrations)")
         logo_path = try_load_logo()
         ctx = build_report_context(
             client_id=client_id,
-            timestamp=datetime.now().isoformat(timespec="seconds"),
+            timestamp=archived["timestamp"],
             pd_value=pd_val,
             threshold=threshold,
             inputs_json=json.dumps(inputs, ensure_ascii=False),
@@ -383,6 +299,8 @@ def main():
             logo_path=logo_path,
             primary_color=cfg.report_primary_color,
             footer_text=cfg.report_footer_text,
+            rating=rating, score_1000=score_1000, decision=decision, risk_level=risk_level,
+            model_id=res.get("model_id"), input_id=res.get("input_id"),
         )
         html = render_html_report(ctx)
 
@@ -396,22 +314,7 @@ def main():
                 use_container_width=True,
             )
         with colP:
-            pdf_bytes = build_pdf_bytes(
-                ctx={
-                    "client_id": client_id,
-                    "timestamp": ctx["timestamp"],
-                    "pd_value": pd_val,
-                    "threshold": threshold,
-                    "model_tag": model_tag,
-                    "inputs": inputs,
-                    "score_1000": score_1000,
-                    "rating": rating,
-                    "decision": decision,
-                    "footer_text": cfg.report_footer_text,
-                },
-                df_exp=df_exp,
-                logo_path=logo_path,
-            )
+            pdf_bytes = build_pdf_bytes(ctx=ctx, df_exp=df_exp, logo_path=logo_path)
             st.download_button(
                 "🧾 Télécharger rapport (PDF corporate)",
                 data=pdf_bytes,
@@ -430,22 +333,7 @@ def main():
                     html_path = os.path.join(REPORTS_DIR, f"report_{client_id}_{ts}.html")
                     pdf_path  = os.path.join(REPORTS_DIR, f"report_{client_id}_{ts}.pdf")
                     with open(html_path, "w", encoding="utf-8") as f: f.write(html)
-                    pdf_bytes2 = build_pdf_bytes(
-                        ctx={
-                            "client_id": client_id,
-                            "timestamp": ctx["timestamp"],
-                            "pd_value": pd_val,
-                            "threshold": threshold,
-                            "model_tag": model_tag,
-                            "inputs": inputs,
-                            "score_1000": score_1000,
-                            "rating": rating,
-                            "decision": decision,
-                            "footer_text": cfg.report_footer_text,
-                        },
-                        df_exp=df_exp,
-                        logo_path=logo_path,
-                    )
+                    pdf_bytes2 = pdf_bytes
                     with open(pdf_path, "wb") as f: f.write(pdf_bytes2)
                     st.success(f"Rapports enregistrés : `{html_path}` et `{pdf_path}`")
 

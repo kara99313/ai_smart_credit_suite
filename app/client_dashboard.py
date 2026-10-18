@@ -1,360 +1,134 @@
-# app/client_dashboard.py
+"""Dashboard of recorded scoring dossiers; simulations never replace history."""
+from pathlib import Path
 import streamlit as st
 import pandas as pd
-import json
-import os
-from io import StringIO, BytesIO
-from datetime import datetime, timedelta
+from utils.client_dashboard_data import (load_history, filter_history, calculate_kpis,
+    record_display, timeline_figure, distribution_figure, export_history_csv, valid_number)
+from utils.report_generator import render_html_report
+from utils.reporting_pdf import build_pdf_bytes
+from utils.settings import get_settings
 
-# Plotly pour des graphes interactifs
-import plotly.express as px
-import plotly.graph_objects as go
+LOG_PATH = 'data/predictions_log.csv'
 
-LOG_PATH = "data/predictions_log.csv"
 
-# =====================================================================
-# Helpers: chargement, parsing, enrichissement
-# =====================================================================
-def ensure_log_file():
-    os.makedirs("data", exist_ok=True)
-    if not os.path.exists(LOG_PATH):
-        with open(LOG_PATH, "w", encoding="utf-8") as f:
-            f.write("timestamp,client_id,prob_default,pred_label,threshold,inputs_json,model_tag\n")
+def load_logs():
+    return load_history(LOG_PATH)
 
-def load_logs() -> pd.DataFrame:
-    ensure_log_file()
-    try:
-        df = pd.read_csv(LOG_PATH)
-    except Exception:
-        df = pd.DataFrame(columns=[
-            "timestamp","client_id","prob_default","pred_label","threshold","inputs_json","model_tag"
-        ])
-    # horodatage -> UTC naive (sans timezone) pour comparaisons robustes
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True).dt.tz_convert(None)
-    # types
-    for c in ["prob_default", "threshold"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    if "pred_label" in df.columns:
-        df["pred_label"] = pd.to_numeric(df["pred_label"], errors="coerce").astype("Int64")
-    # inputs_json -> dict à la volée
-    if "inputs_json" in df.columns:
-        def _safe_json(x):
-            try:
-                return json.loads(x) if isinstance(x, str) and x.strip() else {}
-            except Exception:
-                return {}
-        df["inputs_dict"] = df["inputs_json"].apply(_safe_json)
-    return df
 
-def extract_inputs_to_cols(df: pd.DataFrame) -> pd.DataFrame:
-    """Ajoute des colonnes dérivées des inputs (sans explosion)."""
-    if "inputs_dict" not in df.columns or df.empty:
-        return df
-    all_keys = []
-    for d in df["inputs_dict"]:
-        if isinstance(d, dict):
-            all_keys.extend(list(d.keys()))
-    if not all_keys:
-        return df
-    key_counts = pd.Series(all_keys).value_counts()
-    top_keys = key_counts.index[:20]
-    for k in top_keys:
-        df[f"inp__{k}"] = df["inputs_dict"].apply(lambda d: d.get(k, None) if isinstance(d, dict) else None)
-    return df
+def _rate(value):
+    return 'Indisponible' if value is None else f'{value:.1%}'
 
-# =====================================================================
-# KPI Block
-# =====================================================================
-def kpi_block(df: pd.DataFrame, threshold: float):
-    total = len(df)
-    if total == 0:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Prédictions", "0")
-        c2.metric("Taux défaut (>= seuil)", "--")
-        c3.metric("Seuil courant", f"{threshold:.2f}")
-        c4.metric("Clients uniques", "0")
-        return
 
-    # Calculs généraux
-    bad = (df["prob_default"] >= threshold).sum()
-    rate = bad / total if total > 0 else 0.0
-    unique_clients = df["client_id"].nunique()
-
-    # 7 derniers jours (comparaison de timestamps naïfs)
-    now = pd.Timestamp.utcnow().tz_localize(None)
-    last_7d = df[df["timestamp"] >= (now - timedelta(days=7))]
-    last_7d_cnt = len(last_7d)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Prédictions", f"{total:,}")
-    c2.metric("Taux défaut (>= seuil)", f"{rate:.1%}")
-    c3.metric("Seuil courant", f"{threshold:.2f}")
-    c4.metric("Préd. (7j)", f"{last_7d_cnt:,}")
-
-    c5, c6 = st.columns(2)
-    c5.metric("Clients uniques", f"{unique_clients:,}")
-    if "pred_label" in df.columns and df["pred_label"].notna().any():
-        acc = (df["pred_label"] == (df["prob_default"] >= df["threshold"]).astype("Int64")).mean()
-        c6.metric("Cohérence préd./seuil", f"{acc:.1%}")
-    else:
-        c6.metric("Cohérence préd./seuil", "—")
-
-# =====================================================================
-# Graphiques
-# =====================================================================
-def timeline_block(df: pd.DataFrame, title: str = "Évolution des probabilités"):
-    if df.empty:
-        st.info("Aucune donnée pour la période / les filtres sélectionnés.")
-        return
-    df = df.sort_values("timestamp")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=df["timestamp"], y=df["prob_default"],
-        mode="lines+markers",
-        name="Probabilité de défaut"
-    ))
-    fig.update_layout(
-        title=title,
-        xaxis_title="Temps",
-        yaxis_title="Probabilité",
-        height=320,
-        margin=dict(l=10, r=10, t=50, b=10)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    return fig  # on retourne la figure pour le rapport
-
-def dist_block(df: pd.DataFrame, threshold: float):
-    if df.empty:
-        return None
-    fig = px.histogram(df, x="prob_default", nbins=40, title="Distribution des probabilités")
-    fig.add_vline(x=threshold, line_dash="dash", line_color="red",
-                  annotation_text=f"Seuil {threshold:.2f}", annotation_position="top")
-    fig.update_layout(height=320, margin=dict(l=10, r=10, t=50, b=10))
-    st.plotly_chart(fig, use_container_width=True)
-    return fig  # pour le rapport
-
-# =====================================================================
-# Génération de rapport (PDF + fallback HTML)
-# =====================================================================
-def _fig_to_png_bytes(fig) -> bytes:
-    """
-    Convertit une figure Plotly en PNG (en mémoire).
-    Nécessite kaleido: pip install kaleido
-    """
-    return fig.to_image(format="png")  # peut lever une exception si kaleido absent
-
-def generate_client_report_pdf(df: pd.DataFrame, client_id: str, threshold: float) -> bytes:
-    """
-    Génère un PDF (bytes) avec ReportLab + images des figures Plotly.
-    Requiert: reportlab et kaleido installés.
-    """
-    from reportlab.lib.pagesizes import A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image
-    from reportlab.lib.styles import getSampleStyleSheet
-
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4)
-    styles = getSampleStyleSheet()
-    story = []
-
-    # Titre et contexte
-    story.append(Paragraph(f"Rapport Client – {client_id}", styles['Title']))
-    story.append(Spacer(1, 10))
-    story.append(Paragraph(f"Seuil de décision : <b>{threshold:.2f}</b>", styles['Normal']))
-    story.append(Spacer(1, 8))
-
-    total = len(df)
-    avg_prob = df["prob_default"].mean() if total > 0 else 0
-    default_rate = (df["prob_default"] >= threshold).mean() if total > 0 else 0
-
-    story.append(Paragraph(f"Total prédictions : <b>{total}</b>", styles['Normal']))
-    story.append(Paragraph(f"Probabilité moyenne : <b>{avg_prob:.2%}</b>", styles['Normal']))
-    story.append(Paragraph(f"Taux défaut (>= seuil) : <b>{default_rate:.2%}</b>", styles['Normal']))
-    story.append(Spacer(1, 12))
-
-    # Figures: timeline + distribution si existantes
-    # On re-génère des figures propres (tri)
-    if not df.empty:
-        df_sorted = df.sort_values("timestamp")
-        fig_t = go.Figure()
-        fig_t.add_trace(go.Scatter(x=df_sorted["timestamp"], y=df_sorted["prob_default"],
-                                   mode="lines+markers", name="Prob. défaut"))
-        fig_t.update_layout(title="Évolution des probabilités", xaxis_title="Temps", yaxis_title="Probabilité")
-        img_t = _fig_to_png_bytes(fig_t)
-        story.append(Image(BytesIO(img_t), width=400, height=220))
-        story.append(Spacer(1, 10))
-
-        fig_d = px.histogram(df, x="prob_default", nbins=30, title="Distribution des probabilités")
-        fig_d.add_vline(x=threshold, line_dash="dash", line_color="red",
-                        annotation_text=f"Seuil {threshold:.2f}", annotation_position="top")
-        img_d = _fig_to_png_bytes(fig_d)
-        story.append(Image(BytesIO(img_d), width=400, height=220))
-        story.append(Spacer(1, 12))
-
-    # Conclusion simple
-    story.append(Paragraph(
-        "Interprétation rapide : plus la probabilité est élevée, plus le risque de défaut est important. "
-        "La ligne verticale sur l’histogramme représente le seuil de décision utilisé.",
-        styles['Italic']
-    ))
-
-    doc.build(story)
-    return buffer.getvalue()
-
-def generate_client_report_html(df: pd.DataFrame, client_id: str, threshold: float) -> bytes:
-    """
-    Fallback: Génère un rapport HTML autonome (aucune dépendance supplémentaire).
-    Les graphiques restent interactifs (embed Plotly).
-    """
-    # Figures en HTML
-    df_sorted = df.sort_values("timestamp")
-    fig_t = go.Figure()
-    if not df_sorted.empty:
-        fig_t.add_trace(go.Scatter(x=df_sorted["timestamp"], y=df_sorted["prob_default"],
-                                   mode="lines+markers", name="Prob. défaut"))
-    fig_t.update_layout(title="Évolution des probabilités (interactif)", xaxis_title="Temps", yaxis_title="Probabilité")
-    html_t = fig_t.to_html(full_html=False, include_plotlyjs='cdn')
-
-    fig_d = px.histogram(df, x="prob_default", nbins=30, title="Distribution des probabilités (interactive)")
-    fig_d.add_vline(x=threshold, line_dash="dash", line_color="red",
-                    annotation_text=f"Seuil {threshold:.2f}", annotation_position="top")
-    html_d = fig_d.to_html(full_html=False, include_plotlyjs='cdn')
-
-    total = len(df)
-    avg_prob = df["prob_default"].mean() if total > 0 else 0
-    default_rate = (df["prob_default"] >= threshold).mean() if total > 0 else 0
-
-    html = f"""<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<title>Rapport Client – {client_id}</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body style="font-family: Arial; margin: 20px;">
-<h1>Rapport Client – {client_id}</h1>
-<p><b>Seuil de décision :</b> {threshold:.2f}</p>
-<ul>
-  <li><b>Total prédictions :</b> {total}</li>
-  <li><b>Probabilité moyenne :</b> {avg_prob:.2%}</li>
-  <li><b>Taux défaut (≥ seuil) :</b> {default_rate:.2%}</li>
-</ul>
-<hr>
-<h3>Timeline</h3>
-{html_t}
-<hr>
-<h3>Distribution</h3>
-{html_d}
-<p style="font-style:italic; color:#444; margin-top:16px;">
-  Interprétation rapide : plus la probabilité est élevée, plus le risque de défaut est important.
-  La ligne verticale sur l’histogramme représente le seuil de décision utilisé.
-</p>
-</body>
-</html>"""
-    return html.encode("utf-8")
-
-# =====================================================================
-# UI principale
-# =====================================================================
 def main():
-    st.title("Dashboard Client / Historique")
-    st.caption("Filtre par client, date et seuil • KPIs • Timeline • Export • Rapport")
-
-    df = load_logs()
-    df = df.dropna(subset=["timestamp", "client_id"]).copy()
-    df = extract_inputs_to_cols(df)
-
-    # ------------------ Barre de filtres ------------------
-    with st.container():
-        c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1])
-        clients = ["(Tous)"] + sorted(df["client_id"].dropna().astype(str).unique().tolist())
-        client_pick = c1.selectbox("Client", clients, index=0)
-
-        if not df.empty:
-            min_date = df["timestamp"].min().date()
-            max_date = df["timestamp"].max().date()
+    st.title('Dashboard Client / Historique')
+    st.caption('Résultats archivés et simulations distinctes. Aucun défaut observé n’est disponible dans ce journal.')
+    try:
+        df = load_logs()
+    except (ValueError, OSError) as error:
+        st.error(f'Lecture du journal impossible : {error}')
+        return
+    st.caption(f'Historique disponible : {len(df)} dossiers')
+    if df.empty:
+        st.info('Aucune prédiction enregistrée.')
+        return
+    for message in df.get('_history_warning', []).unique() if '_history_warning' in df else []:
+        if isinstance(message, str):
+            st.warning(message)
+    clients = [None] + sorted(df['_client'].unique().tolist())
+    client = st.selectbox('Client', clients,
+        format_func=lambda value: 'Tous les clients' if value is None else value or 'Client non renseigné')
+    start = end = None
+    include_undated = True
+    if st.checkbox('Filtrer par dates (UTC)', value=False):
+        dated = df['_timestamp'].dropna()
+        if dated.empty:
+            st.info('Aucune date valide : les dossiers restent disponibles.')
         else:
-            today = datetime.utcnow().date()
-            min_date = max_date = today
-
-        date_from = c2.date_input("Du", value=min_date, min_value=min_date, max_value=max_date)
-        date_to = c3.date_input("Au", value=max_date, min_value=min_date, max_value=max_date)
-
-        threshold = float(c4.slider("Seuil", 0.05, 0.95, 0.50, 0.01))
-
-    # ------------------ Application des filtres ------------------
-    dff = df.copy()
-    start_ts = pd.to_datetime(str(date_from))  # naive
-    end_ts = pd.to_datetime(str(date_to)) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-    dff = dff[(dff["timestamp"] >= start_ts) & (dff["timestamp"] <= end_ts)]
-    if client_pick != "(Tous)":
-        dff = dff[dff["client_id"].astype(str) == client_pick]
-
-    st.markdown("---")
-    kpi_block(dff, threshold)
-
-    # ------------------ Graphes ------------------
-    g1, g2 = st.columns(2)
-    with g1:
-        fig_t = timeline_block(dff, title="Timeline des probabilités")
-    with g2:
-        fig_d = dist_block(dff, threshold)
-
-    st.markdown("---")
-
-    # ------------------ Table + Export + Rapports ------------------
-    st.subheader("Événements filtrés")
-    if not dff.empty:
-        show_cols = ["timestamp", "client_id", "prob_default", "pred_label", "threshold", "model_tag"]
-        extra_cols = [c for c in dff.columns if c.startswith("inp__")]
-        show_cols += extra_cols
-        st.dataframe(dff[show_cols].sort_values("timestamp", ascending=False), use_container_width=True, height=280)
-
-        # Export CSV
-        buff = StringIO()
-        dff.to_csv(buff, index=False)
-        st.download_button(
-            "Télécharger CSV filtré",
-            data=buff.getvalue().encode("utf-8"),
-            file_name="client_dashboard_export.csv",
-            mime="text/csv"
-        )
-
-        # Boutons de rapport
-        st.markdown("#### 📄 Rapports")
-        cpdf, chtml = st.columns(2)
-        # Nom du “client” pour le rapport (si Tous → 'Portefeuille')
-        report_id = client_pick if client_pick != "(Tous)" else "Portefeuille"
-
-        with cpdf:
-            if st.button("Générer PDF"):
-                try:
-                    pdf_bytes = generate_client_report_pdf(dff, report_id, threshold)
-                    st.download_button(
-                        label="⬇️ Télécharger le PDF",
-                        data=pdf_bytes,
-                        file_name=f"rapport_{report_id}.pdf",
-                        mime="application/pdf"
-                    )
-                except Exception as e:
-                    st.error(f"Échec PDF (installez 'reportlab' et 'kaleido') : {e}")
-
-        with chtml:
-            if st.button("Générer HTML"):
-                html_bytes = generate_client_report_html(dff, report_id, threshold)
-                st.download_button(
-                    label="⬇️ Télécharger le HTML",
-                    data=html_bytes,
-                    file_name=f"rapport_{report_id}.html",
-                    mime="text/html"
-                )
-
+            left,right = st.columns(2)
+            start = left.date_input('Du', value=dated.min().date())
+            end = right.date_input('Au', value=dated.max().date())
+            include_undated = st.checkbox('Inclure les dossiers sans date', value=True)
+            if start > end:
+                st.warning('La date de début doit précéder la date de fin.')
+                return
+    filtered = filter_history(df, client, start, end, include_undated)
+    if filtered.empty:
+        st.info('Aucun dossier pour ces filtres.')
+        return
+    kpis = calculate_kpis(filtered)
+    st.subheader('Indicateurs des dossiers filtrés')
+    fields = [('Dossiers', str(kpis['total'])), ('PD valides', str(kpis['valid_pd'])),
+              ('PD prédite moyenne', _rate(kpis['mean_pd'])),
+              ('PD ≥ seuil historique', _rate(kpis['historical_above_rate'])),
+              ('Décisions enregistrées', str(kpis['recorded_decisions'])),
+              ('Clients identifiés', str(kpis['unique_clients']))]
+    for column,(title,value) in zip(st.columns(6), fields):
+        column.metric(title,value)
+    st.caption(f"PD moyenne : moyenne des {kpis['valid_pd']} PD valides. "
+               f"Dépassement historique : {kpis['historical_above']} / {kpis['historical_comparable']} dossiers avec PD et seuil valides, chaque dossier à son propre seuil. "
+               'Ce ratio est distinct de la décision enregistrée et du défaut observé.')
+    st.caption(f"Données indisponibles : {kpis['invalid_pd']} PD, {kpis['undated']} dates, {kpis['missing_client']} identifiants client. "
+               'Ces lignes restent dans les dossiers et le CSV filtré.')
+    if kpis['decision_counts']:
+        st.write('Décisions historiques (libellés conservés) :', kpis['decision_counts'])
+    st.subheader('Dossier sélectionné')
+    st.caption('Sélection initiale : date connue la plus récente ; à date identique, dernière occurrence du journal. '
+               'La chronologie des dossiers sans date est indéterminée.')
+    choices = filtered.index.tolist()
+    def label(index):
+        row = filtered.loc[index]
+        date = str(row['timestamp']) if row['_timestamp'] is not None and not pd.isna(row['_timestamp']) else 'Date indisponible'
+        return f"{row['_client'] or 'Client non renseigne'} / {date} / dossier {row['_record_number']}"
+    selected = st.selectbox('Dossier / occurrence', choices, format_func=label)
+    values,ctx,error = record_display(filtered.loc[selected].to_dict())
+    fields = [('pd_value','PD'), ('score_1000','Score (0-1000)'), ('rating','Notation'),
+              ('risk_level','Niveau de risque'), ('decision','Décision historique'), ('threshold','Seuil historique')]
+    for column,(key,title) in zip(st.columns(6), fields):
+        column.metric(title,values[key])
+    if error:
+        st.warning(f'Dossier incomplet ou invalide : {error}')
+    if ctx:
+        for note in ctx['data_notes']:
+            st.caption(note)
+    simulation_threshold = None
+    if st.checkbox('Activer une simulation de seuil', value=False):
+        initial = valid_number(filtered.loc[selected].get('threshold'))
+        if initial is None:
+            initial = get_settings().decision_threshold
+        simulation_threshold = st.slider('Seuil simulé (aucune modification des décisions)',
+                                         0.0, 1.0, float(initial), .01)
+        simulated = calculate_kpis(filtered, simulation_threshold)
+        st.metric('Simulation : proportion de PD ≥ seuil simulé', _rate(simulated['simulation_rate']))
+        st.caption(f"Simulation : {simulated['simulation_above']} / {simulated['valid_pd']} PD valides. Aucune décision de crédit n'est recalculée.")
+    st.subheader('Graphiques des dossiers filtrés')
+    st.caption('Une série par client, dates en UTC ; PD manquantes interrompues. Dates invalides exclues de la chronologie uniquement. '
+               'La distribution utilise seulement les PD valides. Les seuils pointillés sont historiques ; orange = simulation.')
+    left,right = st.columns(2)
+    left.plotly_chart(timeline_figure(filtered,simulation_threshold),use_container_width=True)
+    right.plotly_chart(distribution_figure(filtered,simulation_threshold),use_container_width=True)
+    st.subheader('Historique filtré : valeurs archivées')
+    columns = [name for name in ('timestamp','client_id','prob_default','score_1000','rating','risk_level','decision','threshold','model_tag') if name in filtered]
+    st.dataframe(filtered[columns].astype('string').fillna('Non renseigné'),hide_index=True,width='stretch')
+    st.download_button('Télécharger CSV historique filtré',export_history_csv(filtered),
+                       file_name='client_dashboard_export.csv',mime='text/csv')
+    st.subheader('Exporter le dossier sélectionné')
+    st.caption('Mêmes valeurs que les cartes du dossier. La simulation et les agrégats ne remplacent pas le résultat historique dans le rapport.')
+    if ctx is None:
+        st.info('Export HTML/PDF indisponible pour ce dossier invalide ; sa ligne reste exportable en CSV.')
     else:
-        st.info("Aucun enregistrement avec ces filtres.")
+        cfg = get_settings()
+        ctx.update(primary_color=cfg.report_primary_color,footer_text=cfg.report_footer_text)
+        logo = cfg.logo_path if (cfg.logo_path and Path(cfg.logo_path).is_file()) else None
+        try:
+            html = render_html_report(ctx).encode('utf-8')
+            pdf = build_pdf_bytes(ctx,df_exp=None,logo_path=logo)
+        except (ValueError,TypeError,OSError) as error:
+            st.error(f'Export impossible : {error}')
+            return
+        name = int(filtered.loc[selected,'_record_number'])
+        st.download_button('Télécharger HTML du dossier',html,file_name=f'dossier_{name}.html',mime='text/html')
+        st.download_button('Télécharger PDF du dossier',pdf,file_name=f'dossier_{name}.pdf',mime='application/pdf')
 
-    st.caption("Source : data/predictions_log.csv (alimenté automatiquement par la page Prédiction).")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -1,12 +1,11 @@
 # app/agent.py
 from __future__ import annotations
 import streamlit as st
-from utils.multitask_agent import create_multitask_agent, as_messages
 from utils.llm_status import llm_status_badge
 
-@st.cache_resource(show_spinner=False)
 def _get_agent():
     # Création agent protégée : s'il échoue, on remonte l'erreur proprement
+    from utils.multitask_agent import create_multitask_agent
     return create_multitask_agent()
 
 def main():
@@ -31,11 +30,16 @@ def main():
             try:
                 agent = _get_agent()
                 # Historique tronqué par as_messages() pour limiter les tokens
+                from utils.multitask_agent import as_messages
                 msgs = as_messages(st.session_state.agent_history[:-1])
-                out = agent.invoke({"input": user_msg, "chat_history": msgs})
+                from utils.agents import run_agent_once
+                out = run_agent_once(agent, user_msg, msgs)
+                from utils.agents import render_report_downloads
+                render_report_downloads(out)
                 answer = out["output"] if isinstance(out, dict) and "output" in out else str(out)
             except Exception as e:
-                answer = f"Erreur agent : {e}"
+                from utils.llm_runtime import explain
+                answer = f"Erreur agent : {explain(e)}"
 
             st.session_state.agent_history.append(("assistant", answer))
             st.chat_message("assistant").markdown(answer)

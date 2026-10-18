@@ -1,23 +1,13 @@
-# utils/llm_status.py
-from __future__ import annotations
-import os, streamlit as st
+"""Configuration badge only; service availability requires an explicit real call."""
+import streamlit as st
+from utils.llm_runtime import select_provider,get_setting,PROVIDERS
 
-def _get_secret(k: str, default: str = "") -> str:
-    try:
-        return st.secrets.get(k, default)
-    except Exception:
-        return os.getenv(k, default)
 
 def llm_status_badge():
-    """Badge d'état LLM (Groq/OpenAI/Ollama) basé sur utils.llm_providers.load_llm()."""
     try:
-        from utils.llm_providers import load_llm
-        llm = load_llm()
-        provider = (_get_secret("LLM_PROVIDER", os.getenv("LLM_PROVIDER","")) or "auto").lower()
-        # Compat LangChain: certains connecteurs exposent model, d'autres model_name
-        model = getattr(llm, "model", None) or getattr(llm, "model_name", None) \
-                or _get_secret("GROQ_MODEL", os.getenv("GROQ_MODEL","")) or "—"
-        st.caption(f"✅ LLM prêt ({provider}) — modèle : {model}")
-    except Exception as e:
-        msg = str(e).split("\n")[0][:180]
-        st.caption(f"❌ LLM KO — {msg}")
+        provider=select_provider()
+        key_name,model_name,default,_,_=PROVIDERS[provider]
+        configured=not key_name or bool(get_setting(key_name).strip())
+        st.caption(f"LLM {provider} : {'Configure seulement' if configured else 'Indisponible (cle absente)'} ; reponse fonctionnelle non testee.")
+    except Exception:
+        st.caption('LLM : configuration invalide ; fonctionnement non teste.')

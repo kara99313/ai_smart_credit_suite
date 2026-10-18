@@ -1,283 +1,131 @@
-# app/report.py
 from __future__ import annotations
-import os, sys, json
+import os
+import re
+import subprocess
+import sys
 from datetime import datetime
-from typing import Any
-
+from pathlib import Path
 import pandas as pd
 import streamlit as st
-
-# Explicabilité pour l’aperçu écran (facultatif si l’API est dispo)
-try:
-    from utils.api_client import explain_credit_api  # type: ignore
-except Exception:  # pas bloquant si absent
-    explain_credit_api = None  # type: ignore
-
-from utils.report_generator import build_report_context, render_html_report
+from utils.csv_utils import read_logs_robust
+from utils.report_generator import build_report_context, render_html_report, report_display_values
 from utils.reporting_pdf import build_pdf_bytes
 from utils.settings import get_settings
 
-DATA_DIR    = os.path.join(os.getcwd(), "data")
+DATA_DIR = os.path.join(os.getcwd(), "data")
 REPORTS_DIR = os.path.join(os.getcwd(), "reports")
-LOG_PATH    = os.path.join(DATA_DIR, "predictions_log.csv")
-
-st.set_page_config(page_title="Rapports (HTML & PDF)", page_icon="🧾", layout="wide")
+LOG_PATH = os.path.join(DATA_DIR, "predictions_log.csv")
 
 
-# ---------------- Helpers ----------------
-def _safe_ts_to_str(ts_val: Any, fmt: str = "%Y-%m-%dT%H:%M:%S") -> str:
-    """Transforme un timestamp potentiellement NaT/None/str en texte sûr."""
-    if ts_val is None:
-        return datetime.now().strftime(fmt)
-    try:
-        ts = pd.to_datetime(ts_val, errors="coerce")
-        if pd.isna(ts):
-            return datetime.now().strftime(fmt)
-        if hasattr(ts, "to_pydatetime"):
-            ts = ts.to_pydatetime()
-        return ts.strftime(fmt)
-    except Exception:
-        return datetime.now().strftime(fmt)
+def _read_logs(path):
+    return read_logs_robust(path)
 
 
-def _read_logs(path: str) -> pd.DataFrame:
-    if not os.path.exists(path):
-        return pd.DataFrame(columns=[
-            "timestamp","client_id","prob_default","pred_label","threshold",
-            "inputs_json","model_tag","rating","decision"
-        ])
-    try:
-        df = pd.read_csv(path, encoding="utf-8", engine="python", on_bad_lines="skip")
-    except Exception:
-        df = pd.read_csv(path, encoding="latin-1", engine="python", on_bad_lines="skip")
-
-    if "timestamp" in df:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=False)
-    for c in ("prob_default", "threshold"):
-        if c in df:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    if "pred_label" in df:
-        df["pred_label"] = pd.to_numeric(df["pred_label"], errors="coerce").fillna(0).astype(int)
-    return df
-
-
-def _rating_to_risk_level(rating: str) -> str:
-    table = {
-        "AAA":"Très faible","AA":"Très faible","A":"Faible","BBB":"Modéré",
-        "BB":"Élevé","B":"Très élevé","CCC":"Critique","CC":"Critique",
-        "C":"Critique","D":"Défaut imminent"
-    }
-    return table.get(str(rating), "Inconnu")
-
-
-def _plot_contrib_bar(df: pd.DataFrame):
-    """Graphique Plotly – importance absolue (Top 10)."""
-    try:
-        import plotly.express as px
-    except Exception:
-        return None
-    d = df.copy()
-    if "abs_contribution" not in d.columns:
-        d["abs_contribution"] = d["contribution"].abs()
-    d = d.sort_values("abs_contribution", ascending=True).tail(10)
-    fig = px.bar(
-        d, x="abs_contribution", y="feature", orientation="h",
-        title="Principaux facteurs (importance absolue)"
+def _report_context_from_row(row):
+    ctx = build_report_context(
+        client_id=row.get("client_id"), timestamp=row.get("timestamp"),
+        pd_value=row.get("prob_default"), threshold=row.get("threshold"),
+        inputs_json=row.get("inputs_json"), model_tag=row.get("model_tag"),
+        rating=row.get("rating"), decision=row.get("decision"),
+        score_1000=row.get("score_1000"), risk_level=row.get("risk_level"),
+        model_id=row.get("model_id"), input_id=row.get("input_id"),
     )
-    fig.update_layout(height=420, margin=dict(l=10, r=10, t=40, b=10))
-    return fig
+    if row.get("_history_warning"):
+        ctx["data_notes"].append(str(row["_history_warning"]))
+    return ctx
 
 
-# ---------------- UI ----------------
+def _safe_filename(value):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "dossier")).strip("._") or "dossier"
+
+
 def main():
-    st.title("🧾 Génération de rapports — HTML & PDF")
-    st.caption("Sélectionnez une prédiction, générez le rapport HTML/PDF (structure CA), puis sauvegardez-le.")
-
-    df = _read_logs(LOG_PATH)
-    if df.empty:
-        st.info("Aucune donnée dans le journal `data/predictions_log.csv`. Lancez au moins une prédiction.")
+    st.set_page_config(page_title="Rapports HTML et PDF", page_icon="R", layout="wide")
+    st.title("Rapports HTML et PDF")
+    st.caption("Selectionnez un dossier. Les valeurs disponibles de la prediction sont conservees.")
+    try:
+        df = _read_logs(LOG_PATH)
+    except (ValueError, OSError) as error:
+        st.error(f"Lecture du journal impossible : {error}")
         return
-
-    # Aperçu des dernières prédictions
-    st.markdown("### Aperçu des dernières prédictions ↪")
-    cols_to_show = ["timestamp","client_id","prob_default","pred_label","threshold","model_tag","rating","decision"]
-    preview = df.sort_values("timestamp", ascending=False).head(10).copy()
-    st.dataframe(preview[cols_to_show], use_container_width=True, hide_index=True)
-    st.markdown("---")
-
-    # Sélection
-    st.markdown("#### 🔎 Sélection")
-    c1, c2, c3 = st.columns([2,2,1])
-    df_sorted = df.sort_values("timestamp", ascending=False)
-
-    with c1:
-        clients = df_sorted["client_id"].dropna().astype(str).unique().tolist()
-        client_id = st.selectbox("Client", options=clients, index=0 if clients else None)
-
-    with c2:
-        same_client = df_sorted[df_sorted["client_id"].astype(str) == str(client_id)]
-        dates = same_client["timestamp"].astype(str).tolist()
-        date_choice = st.selectbox("Occurrence (horodatage)", options=dates, index=0 if dates else None)
-
-    with c3:
-        show_raw = st.checkbox("Voir la ligne brute", value=False)
-
-    if date_choice:
-        row = same_client[same_client["timestamp"].astype(str) == date_choice].iloc[0].to_dict()
-    else:
-        row = same_client.iloc[0].to_dict()
-
-    if show_raw:
-        with st.expander("Ligne brute sélectionnée"):
-            st.json(row)
-
-    # Champs sûrs
-    safe_timestamp = _safe_ts_to_str(row.get("timestamp"))
-    pd_value       = float(row.get("prob_default", 0.0) or 0.0)
-    threshold      = float(row.get("threshold", 0.1) or 0.1)
-    model_tag      = str(row.get("model_tag", "pipeline_v1"))
-    rating         = str(row.get("rating", "N/A"))
-    decision       = str(row.get("decision", "N/A"))
-    risk_level     = _rating_to_risk_level(rating)
+    if df.empty:
+        st.info("Aucune prediction enregistree.")
+        return
+    df = df.copy()
+    df["_sort_timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    df = df.sort_values("_sort_timestamp", ascending=False, kind="stable", na_position="last")
+    st.caption(f"Historique : {len(df)} dossiers")
+    preview = ["timestamp", "client_id", "prob_default", "threshold", "rating", "decision"]
+    st.dataframe(df[preview].head(10), hide_index=True, width="stretch")
+    client_keys = df["client_id"].fillna("").astype(str)
+    clients = client_keys.drop_duplicates().tolist()
+    client_id = st.selectbox("Client", clients, format_func=lambda value: value or "Client non renseigne")
+    same_client = df[client_keys == client_id]
+    if same_client.empty:
+        st.info("Aucun dossier pour cette selection.")
+        return
+    choices = same_client.index.tolist()
+    def label(index):
+        row = same_client.loc[index]
+        timestamp = row.get("timestamp")
+        if pd.isna(timestamp) or not str(timestamp).strip():
+            timestamp = "Date non renseignee"
+        return f"{timestamp} / dossier {row['_record_number']}"
+    selected = st.selectbox("Dossier / occurrence", choices, format_func=label)
+    row = same_client.loc[selected].to_dict()
+    if st.checkbox("Voir la ligne source", value=False):
+        st.json({key: str(value) for key,value in row.items() if not key.startswith("_")})
     try:
-        inputs_obj = json.loads(row.get("inputs_json") or "{}")
-    except Exception:
-        inputs_obj = {}
-    score_1000 = int(round((1.0 - max(0.0, min(1.0, pd_value))) * 1000))
-
-    # Tableau récapitulatif (metrics)
-    st.markdown("#### Récapitulatif")
-    r1, r2, r3, r4, r5 = st.columns(5)
-    r1.metric("PD", f"{pd_value*100:.2f}%")
-    r2.metric("Score (0–1000)", f"{score_1000}")
-    r3.metric("Notation", rating)
-    r4.metric("Niveau de risque", risk_level)
-    r5.metric("Décision", decision)
-
-    # Résultats & Explicabilité (graph + tableau)
-    st.markdown("#### Résultats & Explicabilité")
-    df_exp: pd.DataFrame | None = None
-    if explain_credit_api is not None:
-        try:
-            exp = explain_credit_api(inputs_obj, top_k=30)
-            if exp and exp.get("ok"):
-                items = exp.get("items") or []
-                contrib = {}
-                for it in items:
-                    f = str(it.get("feature"))
-                    if "contribution" in it:
-                        contrib[f] = float(it.get("contribution", 0.0))
-                    elif "importance" in it:
-                        contrib[f] = float(it.get("importance", 0.0))
-                if contrib:
-                    df_exp = pd.DataFrame({
-                        "feature": list(contrib.keys()),
-                        "contribution": list(contrib.values())
-                    })
-                    df_exp["value"] = df_exp["feature"].map(lambda f: inputs_obj.get(f))
-                    df_exp["abs_contribution"] = df_exp["contribution"].abs()
-        except Exception:
-            df_exp = None
-
-    if df_exp is not None:
-        fig = _plot_contrib_bar(df_exp)
-        if fig is not None:
-            st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(
-            df_exp.sort_values("abs_contribution", ascending=False)
-                 .loc[:, ["feature","value","contribution","abs_contribution"]]
-                 .head(10),
-            use_container_width=True, hide_index=True
-        )
-    else:
-        st.info("Explications détaillées non disponibles pour cette occurrence.")
-
-    # Préparation HTML
+        ctx = _report_context_from_row(row)
+    except (ValueError, TypeError) as error:
+        st.warning(f"Dossier incomplet ou invalide : {error}")
+        return
     cfg = get_settings()
-    logo_path = None
-    for p in ["assets/logo.png", os.path.join("assets", "logo.png")]:
-        if os.path.exists(p):
-            logo_path = p
-            break
-
-    ctx_html = build_report_context(
-        client_id=str(client_id),
-        timestamp=safe_timestamp,
-        pd_value=pd_value,
-        threshold=threshold,
-        inputs_json=json.dumps(inputs_obj, ensure_ascii=False),
-        model_tag=model_tag,
-        logo_path=logo_path,
-        primary_color=cfg.report_primary_color,
-        footer_text=cfg.report_footer_text,
-    )
-    html_doc = render_html_report(ctx_html)
-
-    # Téléchargements
-    st.markdown("### ⬇️ Téléchargements")
-    colH, colP = st.columns(2)
-    with colH:
-        st.download_button(
-            "📥 Télécharger le rapport (HTML)",
-            data=html_doc.encode("utf-8"),
-            file_name=f"report_{client_id}.html",
-            mime="text/html",
-            use_container_width=True,
-        )
-    with colP:
-        pdf_bytes = build_pdf_bytes(
-            ctx={
-                "client_id": str(client_id),
-                "timestamp": safe_timestamp,
-                "pd_value": pd_value,
-                "threshold": threshold,
-                "model_tag": model_tag,
-                "inputs": inputs_obj,
-                "score_1000": score_1000,
-                "rating": rating,
-                "risk_level": risk_level,
-                "decision": decision,
-                "footer_text": cfg.report_footer_text,
-            },
-            df_exp=df_exp,
-            logo_path=logo_path,
-        )
-        st.download_button(
-            "🧾 Télécharger le rapport (PDF corporate)",
-            data=pdf_bytes,
-            file_name=f"report_{client_id}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
-
-    # Enregistrement local + ouverture dossier
-    st.markdown("### 💾 Enregistrer dans /reports")
+    ctx.update(primary_color=cfg.report_primary_color, footer_text=cfg.report_footer_text)
+    logo = "assets/logo.png" if Path("assets/logo.png").is_file() else None
+    ctx["logo_path"] = logo
+    values = report_display_values(ctx)
+    st.subheader("Resultats conserves")
+    fields = [("pd_value", "PD"), ("score_1000", "Score (0-1000)"), ("rating", "Notation"),
+              ("risk_level", "Niveau de risque"), ("decision", "Decision"), ("threshold", "Seuil utilise")]
+    for column,(key,title) in zip(st.columns(6),fields):
+        column.metric(title, values[key])
+    for note in ctx["data_notes"]:
+        st.caption(note)
+    st.info("Aucune explication individuelle validee n'est disponible pour ce dossier. Les importances globales ne sont pas des contributions individuelles.")
     try:
-        os.makedirs(REPORTS_DIR, exist_ok=True)
-        b1, b2 = st.columns([2,1])
-        with b1:
-            if st.button("📂 Enregistrer HTML + PDF (horodaté)", use_container_width=True):
-                ts = datetime.now().isoformat(timespec="seconds").replace(":", "").replace(" ", "_")
-                html_path = os.path.join(REPORTS_DIR, f"report_{client_id}_{ts}.html")
-                pdf_path  = os.path.join(REPORTS_DIR, f"report_{client_id}_{ts}.pdf")
-                with open(html_path, "w", encoding="utf-8") as f:
-                    f.write(html_doc)
-                with open(pdf_path, "wb") as f:
-                    f.write(pdf_bytes)
-                st.success(f"Rapports enregistrés : `{html_path}` et `{pdf_path}`")
-        with b2:
-            if st.button("📁 Ouvrir le dossier /reports", use_container_width=True):
-                try:
-                    if os.name == "nt":
-                        os.startfile(REPORTS_DIR)  # type: ignore[attr-defined]
-                    elif sys.platform == "darwin":
-                        os.system(f'open "{REPORTS_DIR}"')
-                    else:
-                        os.system(f'xdg-open "{REPORTS_DIR}"')
-                except Exception as e:
-                    st.warning(f"Impossible d’ouvrir le dossier automatiquement : {e}")
-    except Exception as e:
-        st.warning(f"Enregistrement impossible : {e}")
+        html_doc = render_html_report(ctx)
+        pdf_bytes = build_pdf_bytes(ctx, df_exp=None, logo_path=logo)
+    except (ValueError, TypeError, OSError) as error:
+        st.error(f"Generation du rapport impossible : {error}")
+        return
+    name = _safe_filename(ctx["client_id"])
+    st.download_button("Telecharger HTML", html_doc.encode("utf-8"), file_name=f"report_{name}.html", mime="text/html")
+    st.download_button("Telecharger PDF", pdf_bytes, file_name=f"report_{name}.pdf", mime="application/pdf")
+    if st.button("Enregistrer HTML et PDF"):
+        try:
+            folder = Path(REPORTS_DIR)
+            folder.mkdir(parents=True, exist_ok=True)
+            suffix = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            html_path = folder / f"report_{name}_{suffix}.html"
+            pdf_path = folder / f"report_{name}_{suffix}.pdf"
+            with html_path.open("x", encoding="utf-8") as stream:
+                stream.write(html_doc)
+            with pdf_path.open("xb") as stream:
+                stream.write(pdf_bytes)
+            st.success("Rapports HTML et PDF enregistres.")
+        except OSError as error:
+            st.error(f"Enregistrement impossible : {error}")
+    if st.button("Ouvrir le dossier des rapports"):
+        try:
+            folder = Path(REPORTS_DIR)
+            folder.mkdir(parents=True, exist_ok=True)
+            if os.name == "nt":
+                os.startfile(str(folder))
+            else:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
+        except OSError as error:
+            st.warning(f"Ouverture impossible : {error}")
 
 
 if __name__ == "__main__":

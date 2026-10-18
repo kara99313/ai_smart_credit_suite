@@ -1,243 +1,140 @@
-# app/home.py
+"""Home uses the same archived operational indicators as the global dashboard."""
 from __future__ import annotations
+from datetime import datetime, timezone
 from pathlib import Path
-import os
-
 import pandas as pd
-import plotly.express as px
 import streamlit as st
+from utils.client_dashboard_data import load_history, distribution_figure
+from utils.global_dashboard_data import portfolio_kpis, daily_figures
+from utils.runtime_config import backend_url
+from utils.api_client import ping_backend
 
-LOG_PATH = Path("data/predictions_log.csv")
-
-# ========= Utils =========
-@st.cache_data(show_spinner=False)
-def load_logs(path: Path = LOG_PATH) -> pd.DataFrame:
-    if not path.exists():
-        return pd.DataFrame(columns=[
-            "timestamp", "client_id", "prob_default", "pred_label", "threshold", "inputs_json", "model_tag"
-        ])
-    df = pd.read_csv(path)
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    for c in ["prob_default", "threshold"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    if "pred_label" in df.columns:
-        df["pred_label"] = pd.to_numeric(df["pred_label"], errors="coerce")
-    df = df.dropna(subset=["timestamp"]).copy()
-    for c in ["client_id", "prob_default", "threshold", "model_tag"]:
-        if c not in df.columns:
-            df[c] = None
-    return df
+LOG_PATH = Path('data/predictions_log.csv')
+SHORTCUTS = (
+    ('Pr\u00e9diction', 'app/prediction.py'),
+    ('Rapports', 'app/report.py'),
+    ('Dashboard Client', 'app/client_dashboard.py'),
+    ('Dashboard Global', 'app/global_dashboard.py'),
+)
 
 
-def kpis_from_df(df: pd.DataFrame, threshold: float = 0.50):
+def load_logs(path=None):
+    # Re-read CSV and JSONL on each rerun; never cache by pathname alone.
+    return load_history(LOG_PATH if path is None else path)
+
+
+def kpis_from_df(df):
+    """Compatibility entry point delegating every aggregate to the common helper."""
     if df.empty:
-        empty_daily = pd.DataFrame({"d": [], "count": []})
-        fig_daily = px.line(empty_daily, x="d", y="count", title="Volume de prédictions (par jour)", height=260)
-        fig_daily.update_layout(margin=dict(l=10, r=10, t=40, b=10))
-        return {
-            "n_scored": 0, "accept_rate": None, "auc_proxy": 0.90, "new_clients": 0,
-            "hist": None, "daily": fig_daily
-        }
-
-    n_scored = len(df)
-    accept_rate = float((df["prob_default"] < threshold).mean()) if "prob_default" in df else None
-    auc_proxy = 0.91  # proxy d’affichage
-
-    df = df.copy()
-    df["d"] = df["timestamp"].dt.date
-    if df["timestamp"].notna().any():
-        this_month = df["timestamp"].dt.to_period("M").max()
-        new_clients = df[df["timestamp"].dt.to_period("M") == this_month]["client_id"].nunique()
-    else:
-        new_clients = 0
-
-    hist = None
-    if "prob_default" in df:
-        hist = px.histogram(
-            df, x="prob_default", nbins=30, title="Distribution des probabilités", height=260
-        )
-        hist.update_layout(margin=dict(l=10, r=10, t=40, b=10))
-
-    daily = (df.groupby("d").size().reset_index(name="count")
-             if "d" in df.columns else pd.DataFrame({"d": [], "count": []}))
-    fig_daily = px.line(
-        daily, x="d", y="count", markers=True, title="Volume de prédictions (par jour)", height=260
-    )
-    fig_daily.update_layout(margin=dict(l=10, r=10, t=40, b=10))
-
-    return {
-        "n_scored": int(n_scored),
-        "accept_rate": accept_rate,
-        "auc_proxy": auc_proxy,
-        "new_clients": int(new_clients),
-        "hist": hist,
-        "daily": fig_daily
-    }
+        required = ['_pd','_threshold','decision','_client','_timestamp']
+        df = df.reindex(columns=list(dict.fromkeys([*df.columns,*required])))
+    return portfolio_kpis(df)
 
 
-# ========= Page =========
+def rate(value):
+    return 'Indisponible' if value is None else f'{value:.2%}'
+
+
+def check_api(base):
+    """A health request checks the HTTP service, not model inference or RAG."""
+    ok, response = ping_backend(base=base,timeout=3)
+    valid = ok and isinstance(response,dict) and response.get('status') == 'ok'
+    declared = response.get('model_loaded') if isinstance(response,dict) else None
+    return dict(base=base,checked_at=datetime.now(timezone.utc).isoformat(timespec='seconds'),
+                api='Joignable (/health)' if valid else 'Indisponible',
+                model_declared=declared if isinstance(declared,bool) else None,
+                detail='R\u00e9ponse /health valide.' if valid else 'Service inaccessible ou r\u00e9ponse /health inattendue.')
+
+
+def service_panel():
+    st.subheader('\u00c9tat des services')
+    try:
+        base = backend_url()
+    except (ValueError,TypeError,OSError):
+        base = None
+        st.warning('Configuration API invalide ; disponibilit\u00e9 non v\u00e9rifiable.')
+    if st.button('V\u00e9rifier FastAPI',disabled=base is None,key='home_check_api'):
+        st.session_state['home_api_check'] = check_api(base)
+    snapshot = st.session_state.get('home_api_check')
+    if snapshot and snapshot.get('base') != base:
+        snapshot = None
+    st.write('FastAPI :',snapshot['api'] if snapshot else 'Indisponible (non v\u00e9rifi\u00e9)')
+    if snapshot:
+        st.caption(f"Contr\u00f4le HTTP GET /health \u00e0 {snapshot['checked_at']} (UTC). {snapshot['detail']}")
+        if snapshot['model_declared'] is not None:
+            st.caption(f"D\u00e9claration du backend : model_loaded={snapshot['model_declared']}. Ce champ ne prouve pas qu'une inf\u00e9rence fonctionne.")
+    st.write('Mod\u00e8le de scoring : Indisponible (contr\u00f4le fonctionnel non r\u00e9alis\u00e9 ici)')
+    st.write('LLM : Indisponible (appel fonctionnel non r\u00e9alis\u00e9)')
+    st.write('RAG : Indisponible (recherche documentaire non test\u00e9e)')
+    st.caption("Ces statuts portent sur les contr\u00f4les r\u00e9alis\u00e9s dans cette page, pas sur l'existence de fichiers. "
+               "Aucun appel LLM, chargement de mod\u00e8le ou construction d'index n'est lanc\u00e9 \u00e0 l'ouverture.")
+
+
+def navigation_panel():
+    st.subheader('Acc\u00e8s aux parcours valid\u00e9s')
+    for column,(label,path) in zip(st.columns(4),SHORTCUTS):
+        if column.button(f'Ouvrir {label}',key=f'home_nav_{Path(path).stem}'):
+            try:
+                st.switch_page(path)
+            except st.errors.StreamlitAPIException:
+                st.error('Ouvrez streamlit_app.py pour utiliser la navigation entre les onglets.')
+    with st.expander('Autres composants : validation fonctionnelle restante'):
+        st.write('Agent IA, Chatbot Assistant, Chatbot RAG, Observabilit\u00e9, Int\u00e9grations et Administration restent accessibles depuis le menu principal.')
+        st.warning("Leur fonctionnement de bout en bout n'est pas valid\u00e9 par les parcours de scoring. "
+                   "Les badges LLM indiquent la configuration uniquement ; "
+                   "ils ne prouvent pas une r\u00e9ponse du service. Le parcours RAG reste \u00e0 auditer.")
+        st.write("Le Health Check fournit un diagnostic explicite ; il ne certifie pas les parcours LLM/RAG de bout en bout.")
+        st.caption("L'Accueil ne les annonce pas op\u00e9rationnels et ne d\u00e9clenche pas leurs traitements.")
+
+
 def main():
-    st.set_page_config(layout="wide", page_title="Smart Credit Scoring", page_icon=":bar_chart:")
-
-    # ===== Sidebar (AIDE + ÉTAT ENV) — PAS DE page_link ICI =====
+    st.set_page_config(layout='wide',page_title='Accueil / Smart Credit Scoring')
+    st.title('Accueil / Smart Credit Scoring')
+    st.caption('Synth\u00e8se des dossiers archiv\u00e9s, navigation et contr\u00f4les explicites.')
     with st.sidebar:
-        st.header("Aide")
-        st.info(
-            "Utilisez le menu principal (dans la page `streamlit_app.py`) pour naviguer : "
-            "Prédiction, Dashboards, Agent IA, Chatbots, Rapports, etc.",
-            icon="ℹ️"
-        )
-        st.divider()
-        st.subheader("État de l’environnement")
-        st.code(
-            f"LLM_PROVIDER = {os.environ.get('LLM_PROVIDER', 'ollama')}\n"
-            f"OLLAMA_MODEL = {os.environ.get('OLLAMA_MODEL', 'llama3.2:3b')}\n"
-            f"OLLAMA_BASE_URL = {os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434')}\n"
-            f"BACKEND_URL = {os.environ.get('BACKEND_URL', 'http://127.0.0.1:18000')}"
-        )
-
-    # --- En-tête compact : bannière + titre + slogan ---
-    st.markdown(
-        """
-        <div style='display:flex;align-items:center;justify-content:space-between;background:#0B1F33;
-                    border-radius:14px;padding:10px 26px;box-shadow:0 4px 14px #00142855;'>
-            <div style='display:flex;align-items:center;gap:14px;'>
-                <img src='https://images.unsplash.com/photo-1461749280684-dccba630e2f6?auto=format&fit=crop&w=720&q=80'
-                     style='width:110px;height:48px;object-fit:cover;border-radius:8px;box-shadow:0 2px 8px #001;'/>
-                <span style='color:#F9FAFB;font-size:1.8rem;font-weight:700;letter-spacing:0.5px;'>
-                    Smart Credit Scoring
-                </span>
-            </div>
-            <div style='text-align:right;'>
-                <div style='color:#83C5FF;font-size:0.95rem;'>La nouvelle génération d’évaluation du risque</div>
-                <div style='color:#FFD700;font-size:0.95rem;'>Powered by AI & Data Science</div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
-
-    # --- Corps : 3 colonnes équilibrées ---
-    col1, col2, col3 = st.columns([1.25, 1.6, 1.25], gap="large")
-
-    # ===== Colonne 1 : À-PROPOS =====
-    with col1:
-        tabs = st.tabs(["À propos", "Pourquoi", "Navigation"])
-        with tabs[0]:
-            st.markdown(
-                """
-                <div style='background:#F6FAFF;border-radius:14px;padding:12px 12px 6px;'>
-                  <ul style='margin:0 0 0.2rem 1.1rem; line-height:1.55rem; font-size:0.98rem;'>
-                    <li><b>Inclusif</b> : données bancaires & socio-éco</li>
-                    <li><b>Explicable</b> : décisions justifiées (SHAP/LIME)</li>
-                    <li><b>Ultra-analytique</b> : vues portefeuille & client</li>
-                    <li><b>Ouvert</b> : APIs, chatbots, RAG documentaire</li>
-                    <li><b>Personnalisable</b> : thèmes, langues, préférences</li>
-                  </ul>
-                </div>
-                """, unsafe_allow_html=True
-            )
-        with tabs[1]:
-            st.markdown(
-                """
-                <div style='background:#F6FFFB;border-radius:14px;padding:12px 12px 6px;'>
-                  <ul style='margin:0 0 0.2rem 1.1rem; line-height:1.55rem; font-size:0.98rem;'>
-                    <li>Modélisation <b>hybride</b> IA / métier</li>
-                    <li>Interface <b>premium</b>, claire et rapide</li>
-                    <li>Traçabilité, <b>audit</b> et conformité intégrés</li>
-                    <li>Architecture <b>modulaire</b>, évolutive</li>
-                  </ul>
-                </div>
-                """, unsafe_allow_html=True
-            )
-        with tabs[2]:
-            st.markdown(
-                """
-                <div style='background:#FFF9F0;border-radius:14px;padding:10px 12px 2px;'>
-                  <p style='margin:0; line-height:1.55rem; font-size:0.98rem;'>
-                  Utilisez le menu principal (géré par <code>streamlit_app.py</code>) pour accéder aux
-                  pages : Prédiction, Dashboards, Agent IA, Chatbots, Rapports, etc.
-                  </p>
-                </div>
-                """, unsafe_allow_html=True
-            )
-
-    # ===== Colonne 2 : KPIs + Graphiques =====
-    with col2:
+        st.info('Utilisez les raccourcis de cette page ou le menu principal pour changer de parcours.')
+    st.markdown("La pr\u00e9diction fournit une PD, un score et une d\u00e9cision. "
+                "L'explicabilit\u00e9 disponible pr\u00e9sente des importances globales du mod\u00e8le ; "
+                "elle ne constitue pas une contribution individuelle SHAP/LIME. "
+                "Les rapports et dashboards conservent les r\u00e9sultats archiv\u00e9s.")
+    navigation_panel()
+    service_panel()
+    st.subheader('Synth\u00e8se du portefeuille archiv\u00e9')
+    try:
         df = load_logs()
-        k = kpis_from_df(df, threshold=0.50)
+    except (ValueError,OSError) as error:
+        st.error(f'Lecture du journal impossible : {error}')
+        return
+    if '_history_warning' in df:
+        for warning in df['_history_warning'].dropna().unique():
+            st.warning(str(warning))
+    k = kpis_from_df(df)
+    st.caption(f"Historique disponible : {len(df)} dossiers. Source et formules identiques au Dashboard Global.")
+    fields = [('Dossiers archiv\u00e9s',str(k['total'])),('Clients identifi\u00e9s',str(k['unique_clients'])),
+              ('PD pr\u00e9dite moyenne',rate(k['mean_pd'])),('D\u00e9cisions enregistr\u00e9es',str(k['recorded_decisions'])),
+              ('Acceptation historique',rate(k['acceptance_rate'])),('AUC op\u00e9rationnelle','Indisponible')]
+    for column,(label,value) in zip(st.columns(6),fields):
+        column.metric(label,value)
+    st.caption(f"PD moyenne : {k['valid_pd']} PD valides / {k['total']} dossiers. "
+               f"Acceptation historique : {k['accepted']} ACCEPT / {k['recognized_decisions']} d\u00e9cisions reconnues (ACCEPT ou REVIEW/REJECT). "
+               f"{k['missing_decisions']} d\u00e9cisions manquantes et {k['unrecognized_decisions']} autres libell\u00e9s exclus de ce ratio.")
+    st.caption(f"Donn\u00e9es indisponibles : {k['invalid_pd']} PD, {k['undated']} dates, {k['missing_client']} identifiants. "
+               "Les lignes incompl\u00e8tes restent dans les comptages de dossiers.")
+    st.info("AUC et taux de d\u00e9faut observ\u00e9 : Indisponible. Aucune vraie classe observ\u00e9e et appari\u00e9e aux pr\u00e9dictions n'est disponible ici. "
+            "pred_label n'est pas une observation de d\u00e9faut. Aucune performance historique de validation n'est affich\u00e9e comme performance en temps r\u00e9el.")
+    if df.empty:
+        st.info('Aucun dossier enregistr\u00e9.')
+        return
+    st.subheader('Distributions et volumes')
+    left,right = st.columns(2)
+    left.plotly_chart(distribution_figure(df),use_container_width=True,config={'displayModeBar':False})
+    _,volume = daily_figures(df)
+    right.plotly_chart(volume,use_container_width=True,config={'displayModeBar':False})
+    st.caption(f"Distribution : {k['valid_pd']} PD valides / {len(df)} dossiers, axe en pourcentage. "
+               f"Volume quotidien : {len(df)-k['undated']} dossiers dat\u00e9s / {len(df)}, jours UTC, identifiants manquants inclus. "
+               "Aucun seuil de d\u00e9cision ou de simulation n'est appliqu\u00e9 sur l'Accueil.")
+    st.caption('Les filtres et simulations sont disponibles dans les dashboards ; les exports se trouvent dans Rapports et les dashboards.')
 
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Clients scorés", f"{k['n_scored']:,}")
-        k2.metric("Taux d’acceptation", "--" if k["accept_rate"] is None else f"{k['accept_rate']:.0%}")
-        k3.metric("AUC (proxy)", f"{k['auc_proxy']:.2f}")
-        k4.metric("Nouveaux clients (mois)", f"{k['new_clients']:,}")
 
-        g1, g2 = st.columns(2)
-        with g1:
-            if k["hist"] is not None:
-                st.plotly_chart(k["hist"], use_container_width=True, config={"displayModeBar": False})
-            else:
-                st.info("Histogramme indisponible (pas de données).")
-        with g2:
-            if k["daily"] is not None:
-                st.plotly_chart(k["daily"], use_container_width=True, config={"displayModeBar": False})
-            else:
-                st.info("Série quotidienne indisponible.")
-
-        st.markdown(
-            "<div style='text-align:center;color:#0B5ED7;margin-top:4px;'>"
-            "« Un crédit plus juste, une analyse plus fine, un avenir plus sûr. »</div>",
-            unsafe_allow_html=True
-        )
-
-    # ===== Colonne 3 : Branding =====
-    with col3:
-        st.markdown(
-            """
-            <div style='background:#F6FAFF;border-radius:14px;padding:14px;text-align:center;'>
-              <img src='https://cdn-icons-png.flaticon.com/512/3039/3039394.png' width='60' style='margin-bottom:10px;' />
-              <div style='color:#053B74;font-weight:600;font-size:1.04rem;'>Plateforme de scoring IA</div>
-              <div style='color:#053B74;font-size:0.96rem;'>Explicabilité • Sécurité • Excellence</div>
-              <hr style='margin:0.8rem 0 0.6rem 0;'>
-              <div style='font-size:0.94rem;color:#0B5ED7;'>Afrique francophone — Référence</div>
-            </div>
-            """, unsafe_allow_html=True
-        )
-
-        st.markdown(
-            """
-            <div style='background:#EEF6FF;border-radius:14px;padding:10px;margin-top:10px;'>
-              <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.95rem;'>
-                <div>🔮 Prédiction</div>
-                <div>📈 Portefeuille</div>
-                <div>🧑‍💼 Client</div>
-                <div>🤖 Chatbot</div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True
-        )
-
-    # Footer
-    st.markdown(
-        """
-        <div style='width:100%;margin-top:12px;'>
-          <div style='background:linear-gradient(90deg,#001f3f 60%,#0B5ED7 100%);
-                      border-radius:12px;padding:8px 12px;text-align:center;'>
-            <span style='color:#FFD700;font-size:0.98rem;font-weight:600;'>
-              Contact : <a href="mailto:contact@credit-scoring.ai" style="color:#FFF;">contact@credit-scoring.ai</a>
-            </span>
-            <span style='color:#EAF2FF;font-size:0.95rem;margin-left:1.2rem;'>
-              Mentions légales | © 2025 Idriss & OpenAI — Smart Credit Scoring
-            </span>
-          </div>
-        </div>
-        """, unsafe_allow_html=True
-    )
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

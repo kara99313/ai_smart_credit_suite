@@ -1,106 +1,87 @@
-# app/observability.py
+﻿"""Read-only operational journals; availability and coverage are explicit."""
 from __future__ import annotations
 from pathlib import Path
-import json
-import pandas as pd
 import streamlit as st
-from utils.csv_utils import read_logs_robust, sanitize_predictions_log, read_any_csv_robust
+from utils.runtime_config import ROOT
+from utils import audit
+from utils.observability_data import prediction_snapshot, csv_snapshot, agent_statistics, safe_frame
 
-DATA_DIR = Path("data")
-PRED_LOG = DATA_DIR / "predictions_log.csv"
-AGENT_LOG = DATA_DIR / "agent_usage.csv"
+PRED_LOG = ROOT / 'data/predictions_log.csv'
+AGENT_LOG = ROOT / 'data/agent_usage.csv'
 
-def _kpi_card(title: str, value: str):
-    st.markdown(
-        f"""
-        <div style="border:1px solid #e5e7eb;border-radius:12px;padding:14px;background:#fafafa">
-          <div style="font-size:.75rem;color:#6b7280;text-transform:uppercase;letter-spacing:.08em">{title}</div>
-          <div style="font-size:1.5rem;font-weight:800;margin-top:2px">{value}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+
+def show_source(snapshot):
+    source = snapshot['source']
+    labels = {'missing': 'Absent', 'unavailable': 'Inaccessible', 'invalid': 'Invalide',
+              'empty': 'Vide', 'available': 'Lisible', 'present': 'Present'}
+    st.caption('Etat du fichier : ' + labels[source['state']] + '. Ce statut ne certifie pas un service.')
+    if source['size'] is not None:
+        st.caption(f"Taille observee : {source['size']} octets. Modification du fichier (UTC) : {source['modified']}.")
+    for warning in snapshot['warnings']:
+        st.warning(warning)
+    if source['state'] in {'invalid', 'unavailable'}:
+        st.error('Journal indisponible ; aucune metrique calculee pour cette source.')
+    elif source['state'] == 'missing':
+        st.info('Journal absent ; aucune observation disponible.')
+    return source['state'] in {'available', 'empty'}
+
+
+def percentage(value):
+    return f'{value:.1%}' if value is not None else 'Indisponible'
+
 
 def main():
-    st.set_page_config(page_title="Observabilité", page_icon="📡", layout="wide")
-    st.title("📡 Observabilité")
-    st.caption("KPIs d’usage, santé du scoring et suivi de l’agent IA (si activé).")
+    st.title('Observabilite et journaux')
+    st.caption('Lecture seule, sans correction des fichiers ni appel externe. Actualiser relit les sources ; aucune absence de mesure ne vaut zero ou succes.')
+    st.button('Actualiser les journaux')  # Streamlit reruns and reloads all snapshots.
+    st.subheader('Journal des predictions archivees')
+    pred = prediction_snapshot(PRED_LOG)
+    if show_source(pred):
+        k = pred['kpis']
+        if k:
+            cols = st.columns(3)
+            cols[0].metric('Predictions archivees', str(k['total']))
+            cols[1].metric('PD predite moyenne', percentage(k['mean_pd']))
+            cols[2].metric('Decisions ACCEPT archivees', percentage(k['acceptance_rate']))
+            st.caption(f"PD valides : {k['valid_pd']} / {k['total']}. Decisions reconnues : {k['recognized_decisions']} / {k['total']}. Dates absentes ou invalides : {k['undated']}. Aucun resultat reel de remboursement n est observe ici.")
+            daily = pred['daily']
+            if not daily.empty:
+                st.line_chart(daily.set_index('date')[['volume', 'mean_pd']])
+            with st.expander('Derniers enregistrements de predictions'):
+                st.dataframe(safe_frame(pred['frame'].drop(columns=[c for c in pred['frame'] if c.startswith('_')]),200), hide_index=True)
 
-    # ---------- Section Scoring / Prédictions ----------
-    st.subheader("Scoring — Journal des prédictions")
-    if PRED_LOG.exists():
-        sanitize_predictions_log(str(PRED_LOG))
-    dfp = read_logs_robust(str(PRED_LOG))
+    st.caption('Les graphiques regroupent les dates en UTC ; une date historique sans fuseau est interpretee UTC, sans preuve de son fuseau d origine.')
+    st.subheader('Journal d usage des outils agents')
+    st.caption('Fichier optionnel agent_usage.csv. Les parcours agents actuels ne produisent pas ce journal ; sa presence ne prouve pas une instrumentation active ni une couverture exhaustive.')
+    agents = csv_snapshot(AGENT_LOG)
+    if show_source(agents):
+        k = agent_statistics(agents['frame'])
+        cols = st.columns(3)
+        cols[0].metric('Lignes d usage archivees', str(k['total']))
+        cols[1].metric('Succes declares dans le journal', percentage(k['success_rate']))
+        cols[2].metric('Outil le plus archive', k['most_used'] or 'Indisponible')
+        st.caption(f"Succes renseignes (true/false/1/0) : {k['known_success']} / {k['total']}. Inconnus : {k['unknown_success']}. Dates absentes ou invalides : {k['undated']}.")
+        if not k['daily'].empty:
+            st.bar_chart(k['daily'])
+        with st.expander('Enregistrements d usage'):
+            st.caption('Apercu des 300 dernieres lignes du fichier, ordre inverse ; valeurs sensibles masquees.')
+            st.dataframe(safe_frame(agents['frame'].tail(300).iloc[::-1]), hide_index=True)
 
-    if dfp.empty:
-        st.info("Aucun log de prédiction pour le moment.")
-    else:
-        dfp["timestamp"] = pd.to_datetime(dfp["timestamp"], errors="coerce")
-        dfp["prob_default"] = pd.to_numeric(dfp["prob_default"], errors="coerce")
-        dfp["threshold"] = pd.to_numeric(dfp["threshold"], errors="coerce")
-        dfp["approved"] = (dfp["prob_default"] < dfp["threshold"]).astype(int)
+    st.subheader('Journal d audit de configuration')
+    st.caption('Evenements locaux des actions Administration. L acteur session_non_authentifiee ne constitue pas une identite verifiee. Journal non signe ; aucune garantie d exhaustivite ou d inviolabilite.')
+    events = csv_snapshot(audit.AUDIT_PATH, required_columns=audit.COLUMNS)
+    if show_source(events):
+        st.metric('Lignes d audit archivees', str(len(events['frame'])))
+        if not events['frame'].empty:
+            st.dataframe(safe_frame(events['frame'].tail(300).iloc[::-1]), hide_index=True)
 
-        total_preds = len(dfp)
-        avg_pd = dfp["prob_default"].mean() if total_preds else 0.0
-        appr_rate = dfp["approved"].mean() if total_preds else 0.0
+    st.subheader('Journaux applicatifs et etat des services')
+    st.info('Aucun collecteur de logs du serveur ou de Streamlit n est raccorde a cette page. Aucun statut de service, taux d erreur global, latence, cout ou consommation de tokens ne peut etre deduit de ces fichiers.')
+    if st.button('Ouvrir les diagnostics explicites des services'):
+        st.switch_page('app/health_check.py')
+    if st.button('Ouvrir Administration'):
+        st.switch_page('app/admin.py')
 
-        c1, c2, c3 = st.columns(3)
-        _kpi_card("Volume prédictions (total)", f"{total_preds:,}")
-        _kpi_card("PD moyenne", f"{avg_pd*100:,.2f}%")
-        _kpi_card("Taux d’accord", f"{appr_rate*100:,.1f}%")
 
-        df_day = (
-            dfp.assign(day=dfp["timestamp"].dt.date)
-               .groupby("day", as_index=False)
-               .agg(preds=("client_id","count"), avg_pd=("prob_default","mean"), acc=("approved","mean"))
-        )
-        st.markdown("##### Évolution quotidienne")
-        st.line_chart(df_day.set_index("day")[["preds","avg_pd","acc"]])
-
-        with st.expander("Données brutes (dernières lignes)"):
-            st.dataframe(dfp.sort_values("timestamp", ascending=False).head(200), use_container_width=True)
-
-    st.divider()
-
-    # ---------- Section Agent IA ----------
-    st.subheader("Agent IA — Usage & Outils")
-    dfa = read_any_csv_robust(str(AGENT_LOG))
-
-    if dfa.empty:
-        st.info("Aucun log d’agent (agent_usage.csv).")
-    else:
-        if "timestamp" in dfa:
-            dfa["timestamp"] = pd.to_datetime(dfa["timestamp"], errors="coerce")
-            dfa["day"] = dfa["timestamp"].dt.date
-        if "success" in dfa:
-            dfa["success"] = dfa["success"].astype(str)
-
-        total_calls = len(dfa)
-        tools_counts = dfa["tool"].value_counts().to_dict() if "tool" in dfa else {}
-        ok_rate = (dfa["success"] == "True").mean() if "success" in dfa and total_calls else 0.0
-
-        c1, c2, c3 = st.columns(3)
-        _kpi_card("Appels agent (total)", f"{total_calls:,}")
-        _kpi_card("Taux succès outils", f"{ok_rate*100:,.1f}%")
-        most_used = max(tools_counts, key=tools_counts.get) if tools_counts else "-"
-        _kpi_card("Outil le plus utilisé", most_used)
-
-        if "tool" in dfa and "day" in dfa:
-            st.markdown("##### Volume par outil")
-            tool_pivot = dfa.pivot_table(index="day", columns="tool", values="user", aggfunc="count").fillna(0)
-            st.area_chart(tool_pivot)
-
-        with st.expander("Données d’usage (dernières lignes)"):
-            show = dfa.sort_values("timestamp", ascending=False).head(300) if "timestamp" in dfa else dfa.head(300)
-            def _fmt_extra(x):
-                try:
-                    obj = json.loads(x) if isinstance(x, str) else x
-                    return json.dumps(obj, ensure_ascii=False)
-                except Exception:
-                    return str(x)
-            if "extra" in show.columns:
-                show["extra"] = show["extra"].map(_fmt_extra)
-            st.dataframe(show, use_container_width=True)
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

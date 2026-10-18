@@ -87,7 +87,10 @@ def _client_ctx_wrapper(client_id: str = "", max_chars: int = 700) -> str:
             "Contexte client indisponible : l'outil 'client_context_tool' n'est pas chargé.\n"
             "Ajoute-le dans utils/agent_tools.py pour l'activer."
         )
-    return client_context_tool(client_id=client_id, max_chars=max_chars)  # type: ignore
+    try:
+        return client_context_tool(client_id=client_id, max_chars=max_chars)
+    except Exception:
+        return "ERROR: Contexte client indisponible."
 
 # ====================== Déclaration des tools ======================
 
@@ -157,13 +160,14 @@ _SYSTEM = (
 
 # ====================== Création de l'agent ======================
 
-def create_multitask_agent() -> AgentExecutor:
+def create_multitask_agent(use_web=True, system_prompt="") -> AgentExecutor:
     llm = load_llm()
-    tools = _tools()
+    tools = [tool for tool in _tools() if use_web or tool.name != "search_web"]
+    from utils.agents import SAFETY
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", _SYSTEM),
+            ("system", _SYSTEM + SAFETY + " " + system_prompt),
             MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
             MessagesPlaceholder("agent_scratchpad"),
@@ -179,6 +183,7 @@ def create_multitask_agent() -> AgentExecutor:
         verbose=False,
         handle_parsing_errors=True,
         return_intermediate_steps=True,
+        max_execution_time=90,
         max_iterations=4,              # limite pour paliers gratuits
         early_stopping_method="force", # ✅ compatible LC 0.3.x
     )
