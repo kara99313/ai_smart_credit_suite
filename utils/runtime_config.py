@@ -32,7 +32,7 @@ def api_bind() -> tuple[str, int]:
             _port(os.getenv("API_PORT") or backend.get("port", 18000)))
 
 def loopback_url() -> str:
-    return f"http://127.0.0.1:{_port(os.getenv("PORT") or os.getenv("API_PORT") or 8000)}"
+    return f"http://127.0.0.1:{_port(os.getenv('PORT') or os.getenv('API_PORT') or 8000)}"
 
 
 def web_port() -> int:
