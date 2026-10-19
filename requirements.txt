@@ -112,3 +112,4 @@ tqdm==4.67.1
 PyYAML==6.0.3
 langdetect==1.0.9
 duckduckgo-search==6.3.0
+pyarrow==22.0.0
