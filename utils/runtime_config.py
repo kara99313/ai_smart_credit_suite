@@ -31,6 +31,10 @@ def api_bind() -> tuple[str, int]:
     return (os.getenv("API_HOST") or backend.get("host", "127.0.0.1"),
             _port(os.getenv("API_PORT") or backend.get("port", 18000)))
 
+def loopback_url() -> str:
+    return f"http://127.0.0.1:{_port(os.getenv("PORT") or os.getenv("API_PORT") or 8000)}"
+
+
 def web_port() -> int:
     return _port(os.getenv("WEB_PORT") or _config().get("ui", {}).get("web_port", 8501))
 
@@ -65,5 +69,5 @@ if __name__ == "__main__":
     print(json.dumps({
         "api_host": host, "api_port": port, "web_port": web_port(),
         "backend_url": backend_url(),
-        "dotenv_environment": {name: os.environ[name] for name in dotenv_values(ENV_PATH, encoding="utf-8") if name in os.environ} if args.include_dotenv else {},
+        "dotenv_environment": {name: ("[REDACTED]" if any(part in name.upper() for part in ("SECRET", "TOKEN", "PASSWORD", "KEY")) else os.environ[name]) for name in dotenv_values(ENV_PATH, encoding="utf-8") if name in os.environ} if args.include_dotenv else {},
     }))

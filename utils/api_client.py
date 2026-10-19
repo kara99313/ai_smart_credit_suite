@@ -4,11 +4,19 @@ from typing import Dict, Any, Tuple, Optional, Union
 import math
 from numbers import Real
 import requests
-from utils.runtime_config import backend_url
+from utils.runtime_config import backend_url, loopback_url
+from utils.interservice_auth import headers, backend_loopback
 
 # Par défaut, on colle à ton backend réel (18000)
 def _resolve_base(base: Optional[str]) -> str:
-    return backend_url(base)
+    return loopback_url() if backend_loopback.get() else backend_url(base)
+
+
+def _auth_headers(url_base):
+    # Credentials belong only to the configured backend or the scoped loopback.
+    if not backend_loopback.get() and url_base != backend_url():
+        raise ValueError("Destination API non autorisee.")
+    return headers()
 
 
 class ApiError(RuntimeError):
@@ -65,9 +73,11 @@ def predict_credit_api(
     url_base = "configuration API invalide"
     try:
         url_base = _resolve_base(base)
-        options = {"headers": {"X-Prediction-Origin": "synthetic"}} if synthetic else {}
+        options = {"headers": _auth_headers(url_base), "allow_redirects": False}
+        if synthetic:
+            options["headers"]["X-Prediction-Origin"] = "synthetic"
         r = requests.post(f"{url_base}/api/predict", json=payload, timeout=timeout, **options)
-        if not r.ok:
+        if not 200 <= r.status_code < 300:
             raise ApiError(f"HTTP {r.status_code}: {_err_text(r)}")
         return _validate_prediction_response(r.json())
     except ApiError:
@@ -100,8 +110,8 @@ def explain_credit_api(
             body.update(expected_model_id=prediction["model_id"],
                         expected_input_id=prediction["input_id"], expected_pd=prediction["pd"])
         url_base = _resolve_base(base)
-        response = requests.post(f"{url_base}/tools/explain?top_k={int(top_k)}", json=body, timeout=timeout)
-        if not response.ok:
+        response = requests.post(f"{url_base}/tools/explain?top_k={int(top_k)}", json=body, timeout=timeout, headers=_auth_headers(url_base), allow_redirects=False)
+        if not 200 <= response.status_code < 300:
             return None
         result = response.json()
         if not allow_global or not isinstance(result, dict) or result.get("ok") is not True:

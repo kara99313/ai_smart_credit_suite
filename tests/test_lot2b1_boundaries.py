@@ -46,13 +46,13 @@ def test_health_page_denied_before_any_technical_read(configured):
 
 
 def test_public_health_and_removed_debug_routes():
-    from fastapi.testclient import TestClient
+    from interservice_support import TestClient
     import server
     client = TestClient(server.app)
     response = client.get('/health')
     assert response.status_code == 200
     assert response.json() == {'status': 'ok', 'model_loaded': True}
-    schema = client.get('/openapi.json').json()
+    schema = server.app.openapi()
     for path in ('/debug/imports', '/debug/dtypes'):
         assert client.get(path).status_code == 404
         assert path not in schema['paths']

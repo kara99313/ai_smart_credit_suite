@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import numpy as np
-from fastapi.testclient import TestClient
+from interservice_support import TestClient
 import server
 from test_prediction import PAYLOAD
 from utils import api_client
@@ -139,7 +139,7 @@ class ExplanationTests(unittest.TestCase):
 
     def test_legacy_report_consumers_do_not_receive_global_importance(self):
         result = self.explanation()
-        response = SimpleNamespace(ok=True, json=lambda: result)
+        response = SimpleNamespace(ok=True, status_code=200, json=lambda: result)
         with patch.object(api_client.requests, "post", return_value=response):
             self.assertIsNone(api_client.explain_credit_api(PAYLOAD))
             self.assertEqual(api_client.explain_credit_api(PAYLOAD, top_k=30, allow_global=True), result)
@@ -156,6 +156,6 @@ class ExplanationTests(unittest.TestCase):
         mixed["items"][0]["contribution"] = .5
         candidates.append(mixed)
         for result in candidates:
-            response = SimpleNamespace(ok=True, json=lambda r=result: r)
+            response = SimpleNamespace(ok=True, status_code=200, json=lambda r=result: r)
             with self.subTest(result=result), patch.object(api_client.requests, "post", return_value=response):
                 self.assertIsNone(api_client.explain_credit_api(PAYLOAD, top_k=30, allow_global=True, prediction=prediction))

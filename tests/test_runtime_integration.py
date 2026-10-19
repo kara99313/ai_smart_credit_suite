@@ -1,4 +1,5 @@
 from synthetic_history import LOG, SyntheticHistoryTestCase
+from admin_auth_support import authenticated_admin_test
 """Opt-in live smoke test: RUN_RUNTIME_SMOKE=1 python -B -m unittest discover -s tests."""
 import hashlib
 import os
@@ -28,8 +29,15 @@ def available_port(preferred):
         return sock.getsockname()[1]
 
 
+@authenticated_admin_test
 @unittest.skipUnless(os.getenv("RUN_RUNTIME_SMOKE") == "1", "Live servers require RUN_RUNTIME_SMOKE=1")
 class RuntimeIntegrationTests(SyntheticHistoryTestCase):
+    def setUp(self):
+        super().setUp()
+        caller = patch.dict(os.environ, {"BACKEND_URL": self.base, "API_BASE": self.base})
+        caller.start()
+        self.addCleanup(caller.stop)
+
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="credit-runtime-")
@@ -41,7 +49,7 @@ class RuntimeIntegrationTests(SyntheticHistoryTestCase):
         cls.ui_port = available_port(8501)
         cls.base = f"http://127.0.0.1:{cls.api_port}"
         cls.env = dict(os.environ, BACKEND_URL=cls.base, API_BASE=cls.base,
-            API_PORT=str(cls.api_port), WEB_PORT=str(cls.ui_port),
+            INTERSERVICE_SECRET="test-interservice-credential", PORT=str(cls.api_port), API_PORT=str(cls.api_port), WEB_PORT=str(cls.ui_port),
             PYTHONDONTWRITEBYTECODE="1", PYTHONUTF8="1")
         try:
             cls.start("api", ["-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", str(cls.api_port)])
@@ -121,12 +129,22 @@ class RuntimeIntegrationTests(SyntheticHistoryTestCase):
             payload = dict(PAYLOAD, HasMortgage=flag)
             result = predict_credit_api(payload, base=self.base)
             self.assertTrue(0 <= result["pd"] <= 1)
-            echo = requests.post(self.base + "/api/predict_echo", json=payload, timeout=10)
+            echo = requests.post(self.base + "/api/predict_echo", json=payload, timeout=10, headers={"X-Interservice-Secret": "test-interservice-credential"})
             self.assertEqual(echo.status_code, 200)
             self.assertEqual(echo.json()["row0"]["HasMortgage"], "Yes" if flag else "No")
             results.append(result["pd"])
         self.assertNotEqual(*results)
         print("LIVE PD HasMortgage No/Yes:", results, flush=True)
+
+    def test_live_tool_loopback_authentication(self):
+        response = requests.post(self.base + "/tools/predict_credit",
+            json={"data": PAYLOAD}, headers={"X-Interservice-Secret": "test-interservice-credential"},
+            timeout=60, allow_redirects=False)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        self.assertNotIn("chec d'appel", response.json()["result"])
+        self.assertNotIn("test-interservice-credential", response.text)
+        self.assertEqual(requests.post(self.base + "/api/predict", json=PAYLOAD, timeout=10).status_code, 401)
 
     def prediction_page(self):
         from streamlit.testing.v1 import AppTest
@@ -226,7 +244,7 @@ class RuntimeIntegrationTests(SyntheticHistoryTestCase):
             self.assertEqual(len(page.exception), 0, str(page.exception))
             self.assertEqual(len(page.error), 0, str(page.error))
             call = next(call for call in post.call_args_list if call.args[0].endswith("/api/predict"))
-            api = requests.post(self.base + "/api/predict", json=call.kwargs["json"], timeout=10).json()
+            api = requests.post(self.base + "/api/predict", json=call.kwargs["json"], timeout=10, headers={"X-Interservice-Secret": "test-interservice-credential"}).json()
             ctx = contexts[0]
             for key in ("score_1000", "rating", "decision", "threshold", "model_id", "input_id"):
                 self.assertEqual(ctx[key], api[key])

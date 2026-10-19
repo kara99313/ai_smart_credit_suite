@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch
 from uuid import UUID
 import pytest
-from fastapi.testclient import TestClient
+from interservice_support import TestClient
 import server
 from utils import api_client, health_diagnostics
 from utils import prediction_telemetry as telemetry
@@ -49,6 +49,7 @@ def test_synthetic_diagnostic_and_history(store, tmp_path, monkeypatch):
     for name in ('predictions_log.csv', 'predictions_log.results.jsonl'):
         (data / name).write_bytes(b'PRIVATE HISTORY\n')
     before = {p.name: p.read_bytes() for p in data.iterdir()}
+    monkeypatch.setenv('BACKEND_URL', 'http://localhost')
     client = TestClient(server.app)
     def post(url, **kwargs):
         from types import SimpleNamespace
@@ -56,7 +57,7 @@ def test_synthetic_diagnostic_and_history(store, tmp_path, monkeypatch):
         return SimpleNamespace(ok=response.is_success, status_code=response.status_code, json=response.json)
     with patch.object(api_client.requests, 'post', side_effect=post) as transport:
         assert health_diagnostics.inference_check('http://localhost')['state'] == 'Fonctionnel'
-        assert transport.call_args.kwargs['headers'] == {'X-Prediction-Origin': 'synthetic'}
+        assert transport.call_args.kwargs['headers'] == {'X-Prediction-Origin': 'synthetic', 'X-Interservice-Secret': 'test-interservice-credential'}
     assert {p.name: p.read_bytes() for p in data.iterdir()} == before
     assert len(records(store)) == 1
     assert records(store)[0]['origin'] == 'synthetic'

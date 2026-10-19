@@ -29,6 +29,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from utils.interservice_auth import InterserviceAuthMiddleware, backend_loopback
 from utils.runtime_config import ROOT
 from utils.prediction_telemetry import Attempt, PredictionTelemetryMiddleware
 
@@ -305,6 +306,8 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
+app.add_middleware(InterserviceAuthMiddleware)
+
 @app.exception_handler(RequestValidationError)
 async def invalid_request(_request, _error):
     # Validation errors can echo submitted credentials or arbitrary input values.
@@ -393,7 +396,11 @@ def _import_agent_tools() -> Tuple[
 @app.post("/tools/predict_credit")
 def tools_predict_credit(body: PredictToolBody):
     try:
-        txt = _import_agent_tools()[0](json.dumps(body.data, ensure_ascii=False))
+        token = backend_loopback.set(True)
+        try:
+            txt = _import_agent_tools()[0](json.dumps(body.data, ensure_ascii=False))
+        finally:
+            backend_loopback.reset(token)
         return {"ok": True, "result": txt}
     except Exception as e:
         raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None

@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 import numpy as np
-from fastapi.testclient import TestClient
+from interservice_support import TestClient
 import server
 from utils import api_client, runtime_config
 

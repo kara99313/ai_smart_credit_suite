@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
 import requests
-from fastapi.testclient import TestClient
+from interservice_support import TestClient
 import server
 from test_prediction import PAYLOAD
 from utils import api_client, health_diagnostics

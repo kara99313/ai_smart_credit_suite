@@ -66,12 +66,14 @@ if(-not (Test-Path $VenvPy)){
 }
 
 # 3) Parse .env with python-dotenv and use the same resolver as the API client.
-# JSON is captured privately: never print dotenv_environment (it may contain secrets).
+# Secret values are masked in configuration output; Python children load .env themselves.
 $ConfigJson = & $VenvPy -B -X utf8 -m utils.runtime_config --include-dotenv
 if ($LASTEXITCODE -ne 0) { throw "Unable to resolve runtime configuration." }
 $LaunchConfig = $ConfigJson | ConvertFrom-Json
 $LaunchConfig.dotenv_environment.PSObject.Properties | ForEach-Object {
-  [Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, "Process")
+  if ([string]$_.Value -ne "[REDACTED]") {
+    [Environment]::SetEnvironmentVariable($_.Name, [string]$_.Value, "Process")
+  }
 }
 $HostIP = [string]$LaunchConfig.api_host
 $ApiPort = [string]$LaunchConfig.api_port
