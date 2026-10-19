@@ -59,12 +59,14 @@ def _err_text(resp: requests.Response) -> str:
 def predict_credit_api(
     payload: Dict[str, Any],
     timeout: float = 30.0,
-    base: Optional[str] = None
+    base: Optional[str] = None,
+    *, synthetic: bool = False
 ) -> Dict[str, Any]:
     url_base = "configuration API invalide"
     try:
         url_base = _resolve_base(base)
-        r = requests.post(f"{url_base}/api/predict", json=payload, timeout=timeout)
+        options = {"headers": {"X-Prediction-Origin": "synthetic"}} if synthetic else {}
+        r = requests.post(f"{url_base}/api/predict", json=payload, timeout=timeout, **options)
         if not r.ok:
             raise ApiError(f"HTTP {r.status_code}: {_err_text(r)}")
         return _validate_prediction_response(r.json())

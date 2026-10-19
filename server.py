@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from utils.runtime_config import ROOT
+from utils.prediction_telemetry import Attempt, PredictionTelemetryMiddleware
 
 # ===== Chemins / modèle =====
 PROJECT_ROOT = ROOT
@@ -298,6 +299,7 @@ def _prediction_input_id(df: pd.DataFrame) -> str:
 
 # ===== FastAPI =====
 app = FastAPI(title="AI Smart Credit Suite — Backend", version="1.3.0")
+app.add_middleware(PredictionTelemetryMiddleware, model_id=MODEL_ID)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
@@ -311,6 +313,8 @@ async def invalid_request(_request, _error):
 
 # ===== Warm-up =====
 def _warmup_model() -> None:
+    attempt = Attempt(MODEL_ID, warmup=True)
+    status = 500
     try:
         dummy = {
             "DTIRatio": 0.3, "TrustScorePsychometric": 0.6, "HouseholdSize": 3, "NumCreditLines": 2,
@@ -319,8 +323,11 @@ def _warmup_model() -> None:
             "LoanTerm": 12, "LoanAmount": 100000, "InformalIncome": 0.0
         }
         _compute_pd(_prepare_prediction_df(dummy))
+        status = 200
     except Exception as e:
         print("[WARMUP] modele non prechauffe.")
+    finally:
+        attempt.finish(status)
 
 @app.on_event("startup")
 def _on_startup():

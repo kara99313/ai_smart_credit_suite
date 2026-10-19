@@ -83,7 +83,7 @@ def backend_check(base=None):
 def inference_check(base=None):
     # /api/predict does not persist a row: only the Streamlit prediction page logs it.
     try:
-        response=predict_credit_api(dict(TEST_INPUT),base=backend_url(base),timeout=10)
+        response=predict_credit_api(dict(TEST_INPUT),base=backend_url(base),timeout=10,synthetic=True)
         return result('Fonctionnel','Inference synthetique via /api/predict reussie ; aucun enregistrement historique.',
                       pd=response['pd'],model_id=response.get('model_id'))
     except Exception:
