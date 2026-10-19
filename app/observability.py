@@ -2,6 +2,7 @@
 from __future__ import annotations
 from pathlib import Path
 import streamlit as st
+from utils.admin_auth import render_gate
 from utils.runtime_config import ROOT
 from utils import audit
 from utils.observability_data import prediction_snapshot, csv_snapshot, agent_statistics, safe_frame
@@ -31,6 +32,8 @@ def percentage(value):
 
 
 def main():
+    if not render_gate():
+        return
     st.title('Observabilite et journaux')
     st.caption('Lecture seule, sans correction des fichiers ni appel externe. Actualiser relit les sources ; aucune absence de mesure ne vaut zero ou succes.')
     st.button('Actualiser les journaux')  # Streamlit reruns and reloads all snapshots.

@@ -68,8 +68,13 @@ def backend_check(base=None):
         except (ValueError,TypeError): body={'response':'Corps non JSON ; non affiche.'}
         valid=response.status_code==200 and isinstance(body,dict) and body.get('status')=='ok'
         state='Disponible' if valid else 'Indisponible'
+        public_body = {'response': 'Corps HTTP non affiche.'}
+        if valid:
+            public_body = {'status': 'ok'}
+            if isinstance(body.get('model_loaded'), bool):
+                public_body['model_loaded'] = body['model_loaded']
         return result(state,'GET /health reussi ; aucune inference testee.' if valid else 'Reponse HTTP ou schema /health inattendu.',
-                      http_status=response.status_code,payload=redact(body),
+                      http_status=response.status_code,payload=redact(public_body),
                       model_loaded=body.get('model_loaded') if isinstance(body,dict) and isinstance(body.get('model_loaded'),bool) else None)
     except Exception:
         return result('Indisponible','Connexion impossible, delai depasse ou configuration API invalide.',http_status=None,model_loaded=None)

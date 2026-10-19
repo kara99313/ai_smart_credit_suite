@@ -38,27 +38,22 @@ def _validate_prediction_response(result: Any) -> Dict[str, Any]:
 
 
 def ping_backend(base: Optional[str] = None, timeout: float = 3.0) -> Tuple[bool, Union[str, Dict[str, Any]]]:
-    url_base = _resolve_base(base)
     try:
+        url_base = _resolve_base(base)
         r = requests.get(f"{url_base}/health", timeout=timeout)
         if r.ok:
             try:
                 return True, r.json()
             except Exception:
                 return True, "OK"
-        return False, f"HTTP {r.status_code} sur {url_base}/health"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+        return False, f"HTTP {r.status_code} : service indisponible."
+    except Exception:
+        return False, "Connexion API impossible ou configuration invalide."
 
 
 def _err_text(resp: requests.Response) -> str:
-    try:
-        data = resp.json()
-        if isinstance(data, dict) and "detail" in data:
-            return str(data["detail"])
-    except Exception:
-        pass
-    return resp.text.strip()[:2000]
+    """Never expose an untrusted HTTP body, including JSON detail fields."""
+    return "La requete API a echoue."
 
 
 def predict_credit_api(
@@ -75,10 +70,10 @@ def predict_credit_api(
         return _validate_prediction_response(r.json())
     except ApiError:
         raise
-    except requests.RequestException as e:
-        raise ApiError(f"API /api/predict error ({url_base}): {e}") from e
-    except Exception as e:
-        raise ApiError(f"API /api/predict unexpected error ({url_base}): {e}") from e
+    except requests.RequestException:
+        raise ApiError("Connexion API impossible ou delai depasse.") from None
+    except Exception:
+        raise ApiError("Configuration API ou reponse de prediction invalide.") from None
 
 
 def explain_credit_api(

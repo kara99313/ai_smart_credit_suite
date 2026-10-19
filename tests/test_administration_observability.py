@@ -29,6 +29,7 @@ def observability_page(root):
     return AppTest.from_string(script,default_timeout=30)
 
 
+@authenticated_admin_test
 class ObservabilityTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)

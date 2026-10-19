@@ -25,6 +25,8 @@ import joblib
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from utils.runtime_config import ROOT
@@ -301,6 +303,12 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
+@app.exception_handler(RequestValidationError)
+async def invalid_request(_request, _error):
+    # Validation errors can echo submitted credentials or arbitrary input values.
+    return JSONResponse(status_code=422, content={"detail": "Requete invalide ; verifier les parametres."})
+
+
 # ===== Warm-up =====
 def _warmup_model() -> None:
     try:
@@ -312,7 +320,7 @@ def _warmup_model() -> None:
         }
         _compute_pd(_prepare_prediction_df(dummy))
     except Exception as e:
-        print(f"[WARMUP] warning: {e}")
+        print("[WARMUP] modele non prechauffe.")
 
 @app.on_event("startup")
 def _on_startup():
@@ -354,7 +362,7 @@ def api_predict(req: PredictRequest):
             model_id=MODEL_ID, input_id=_prediction_input_id(df),
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"predict failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None
 
 # ===== Outils Agent IA =====
 @lru_cache(maxsize=1)
@@ -381,7 +389,7 @@ def tools_predict_credit(body: PredictToolBody):
         txt = _import_agent_tools()[0](json.dumps(body.data, ensure_ascii=False))
         return {"ok": True, "result": txt}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"predict_credit error: {e}")
+        raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None
 
 @app.post("/tools/rag_search")
 def tools_rag_search(body: RAGPayload):
@@ -389,7 +397,7 @@ def tools_rag_search(body: RAGPayload):
         txt = _import_agent_tools()[1](body.query, mode=body.mode or "docs", k=body.k or 4)
         return {"ok": True, "result": txt}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"rag_search error: {e}")
+        raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None
 
 @app.post("/tools/web_search")
 def tools_web_search(body: WebSearchPayload):
@@ -397,7 +405,7 @@ def tools_web_search(body: WebSearchPayload):
         txt = _import_agent_tools()[2](body.query, k=body.k or 3, fetch=bool(body.fetch))
         return {"ok": True, "result": txt}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"web_search error: {e}")
+        raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None
 
 @app.post("/tools/generate_report_html")
 def tools_generate_report(body: ReportPayload):
@@ -414,14 +422,14 @@ def tools_generate_report(body: ReportPayload):
         html = _import_agent_tools()[3](json.dumps(ctx, ensure_ascii=False))
         return {"ok": True, "html": html}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"generate_report error: {e}")
+        raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None
 
 @app.get("/tools/now")
 def tools_now(fmt: str = "%Y-%m-%d %H:%M:%S"):
     try:
         return {"ok": True, "now": _import_agent_tools()[4](fmt)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"now error: {e}")
+        raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None
 
 # ===== Explain: validated global fallback, separate from individual contributions =====
 @app.post("/tools/explain")
@@ -442,14 +450,14 @@ def tools_explain(body: ExplainPayload, top_k: int = Query(10, ge=1, le=30)):
             result = global_coefficient_importance(_pipe, df)
         except (ValueError, TypeError, AttributeError, KeyError, IndexError) as error:
             return {"ok": False, "method": "unavailable", "scope": "global",
-                    "reason": "invalid_global_explanation", "detail": str(error),
+                    "reason": "invalid_global_explanation", "detail": "Explication globale indisponible.",
                     "items": [], **provenance}
         result["items"] = sorted(result["items"], key=lambda item: item["importance"], reverse=True)[:int(top_k)]
         return {**result, **provenance}
     except HTTPException:
         raise
     except Exception as error:
-        raise HTTPException(status_code=500, detail=f"explain error: {error}")
+        raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None
 
 # ===== Debug utiles =====
 @app.get("/debug/imports")
@@ -461,7 +469,7 @@ def debug_imports():
             ver = getattr(mod, "__version__", "n/a")
             out[m] = {"ok": True, "version": ver}
         except Exception as e:
-            out[m] = {"ok": False, "error": str(e)}
+            out[m] = {"ok": False, "error": "Module indisponible ou incompatible."}
     out["sys_executable"] = sys.executable
     return out
 

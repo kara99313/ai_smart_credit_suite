@@ -101,7 +101,8 @@ def main():
         try:
             _ensure_agent(system_prompt)
         except Exception as e:
-            msg = f"Erreur agent : {e}"
+            from utils.agent_diagnostics import public_message
+            msg = f"Erreur agent : {public_message(e)}"
             st.session_state.assistant_msgs.append(("assistant", msg))
             st.chat_message("assistant").markdown(msg)
             return
@@ -121,7 +122,8 @@ def main():
             st.chat_message("assistant").markdown(answer)
 
         except Exception as e:
-            msg = f"Erreur agent : {e}"
+            from utils.agent_diagnostics import public_message
+            msg = f"Erreur agent : {public_message(e)}"
             st.session_state.assistant_msgs.append(("assistant", msg))
             st.chat_message("assistant").markdown(msg)
     else:

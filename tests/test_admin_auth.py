@@ -165,3 +165,35 @@ def test_provider_audit_uses_verified_identity_without_output(context):
 def test_no_streamlit_context_denies_by_default():
     with pytest.raises(PermissionError):
         auth.require_admin()
+
+
+def test_observability_requires_valid_admin_before_reading(monkeypatch):
+    for key, value in CONFIG.items():
+        monkeypatch.setenv(key, value)
+    auth._FAILURES.clear()
+    with patch('utils.observability_data.prediction_snapshot') as predictions, patch('utils.observability_data.csv_snapshot') as journals:
+        app = AppTest.from_file(str(ROOT / 'app/observability.py')).run()
+        assert not app.exception
+        assert not app.metric
+        assert not any(b.label == 'Actualiser les journaux' for b in app.button)
+        predictions.assert_not_called()
+        journals.assert_not_called()
+        app.text_input[0].set_value('test-admin')
+        app.text_input[1].set_value('invalid')
+        next(b for b in app.button if b.label == 'Se connecter').click().run()
+        predictions.assert_not_called()
+        journals.assert_not_called()
+    # Real grants and the real page gate, with temporary empty sources.
+    with patch('utils.observability_data.prediction_snapshot', return_value={
+            'source': {'state': 'missing', 'size': None}, 'warnings': []}) as predictions, patch(
+            'utils.observability_data.csv_snapshot', return_value={
+                'source': {'state': 'missing', 'size': None}, 'warnings': []}) as journals:
+        app.text_input[0].set_value('test-admin')
+        app.text_input[1].set_value(PASSWORD)
+        next(b for b in app.button if b.label == 'Se connecter').click().run()
+        assert not app.exception
+        assert any(b.label == 'Actualiser les journaux' for b in app.button)
+        assert predictions.called and journals.called
+        predictions.reset_mock(); journals.reset_mock()
+        next(b for b in app.button if b.label == 'Se deconnecter').click().run()
+        predictions.assert_not_called(); journals.assert_not_called()
