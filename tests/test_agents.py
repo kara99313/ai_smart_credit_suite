@@ -1,4 +1,7 @@
-﻿"""Phase 11: tool evidence, provider failures and Streamlit chat paths."""
+"""Phase 11: tool evidence, provider failures and Streamlit chat paths."""
+import json
+from utils.credit_agent_contract import FEATURES
+CREDIT_JSON = json.dumps(dict.fromkeys(FEATURES, 1))
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import patch, Mock
@@ -10,7 +13,7 @@ class AgentTests(unittest.TestCase):
     def test_failed_tool_cannot_be_replaced_by_invented_success(self):
         executor=Mock()
         executor.invoke.return_value={'output':'PD 0%, ACCEPT', 'intermediate_steps':[(NS(tool='predict_credit'),'ERROR: API indisponible')]}
-        out=agents.run_agent_once(executor,'score',[])
+        out=agents.run_agent_once(executor,'score '+CREDIT_JSON,[])
         self.assertNotIn('ACCEPT',out['output'])
         self.assertEqual(out['intermediate_steps'][0]['status'], 'error')
 
@@ -37,17 +40,17 @@ class AgentTests(unittest.TestCase):
 
     def test_prediction_malformed_not_default_zero(self):
         with patch.object(tools,'predict_credit_api',return_value={}):
-            result=tools.predict_credit_tool('{"Income":12}')
+            result=tools.predict_credit_tool(CREDIT_JSON)
         self.assertNotIn('0.00%',result)
 
     def test_prediction_valid_result(self):
         response=dict(pd=.3,score_1000=700,rating='CCC',decision='REVIEW/REJECT',threshold=.1,used_features=['Income'])
         with patch.object(tools,'predict_credit_api',return_value=response):
-            self.assertIn('30.00%',tools.predict_credit_tool('{"Income":12}'))
+            self.assertIn('30.00%',tools.predict_credit_tool(CREDIT_JSON))
 
     def test_prediction_timeout(self):
         with patch.object(tools,'predict_credit_api',side_effect=TimeoutError('SECRET')):
-            result=tools.predict_credit_tool('{"Income":12}')
+            result=tools.predict_credit_tool(CREDIT_JSON)
         self.assertIn('Delai',result);self.assertNotIn('SECRET',result)
 
     def test_report_no_archive_never_defaults_pd(self):

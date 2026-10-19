@@ -1,4 +1,7 @@
 """Lot 3A: evidence presentation and persistent artifacts on both interfaces."""
+import json
+from utils.credit_agent_contract import FEATURES
+CREDIT_JSON = json.dumps(dict.fromkeys(FEATURES, 1))
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 import pytest
@@ -152,7 +155,7 @@ def test_prediction_exact_values_override_model():
     from utils import agent_tools
     response = dict(pd=.3, score_1000=700, rating='CCC', decision='REVIEW/REJECT', threshold=.1, used_features=['Income'])
     with patch.object(agent_tools, 'predict_credit_api', return_value=response):
-        observation = agent_tools.predict_credit_tool('{"Income":12}')
+        observation = agent_tools.predict_credit_tool(CREDIT_JSON)
     result = execute([(NS(tool='predict_credit'), observation)], 'PD 0% ACCEPT')
     assert result['output'] == observation
     assert result['intermediate_steps'][0]['status'] == 'success'

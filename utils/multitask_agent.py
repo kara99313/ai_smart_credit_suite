@@ -29,15 +29,11 @@ except Exception:
 
 # ====================== Schémas Pydantic (outils) ======================
 
+from utils.credit_agent_contract import CONTRACT
+
 class PredictInput(BaseModel):
-    """Chaîne JSON contenant les 15 variables + 'threshold' (float)."""
-    payload_json: str = Field(
-        ...,
-        description=(
-            'Chaîne JSON avec les variables du client. '
-            'Exemple: {"client_id":"CLI-001","DTIRatio":0.35,...,"threshold":0.10}'
-        ),
-    )
+    """Complete prediction JSON, with optional decision threshold."""
+    payload_json: str = Field(..., description=CONTRACT)
 
 class RagInput(BaseModel):
     """Recherche dans les index internes (docs / hybride)."""
@@ -98,10 +94,7 @@ def _tools() -> List[StructuredTool]:
     tools: List[StructuredTool] = [
         StructuredTool.from_function(
             name="predict_credit",
-            description=(
-                "Prédit PD / score (0–1000) / rating / décision à partir d'un JSON "
-                "(15 variables + threshold)."
-            ),
+            description=CONTRACT,
             func=predict_credit_tool,
             args_schema=PredictInput,
         ),
@@ -154,7 +147,7 @@ _SYSTEM = (
     "Utilise les OUTILS quand pertinent : predict_credit, "
     + ("client_context, " if _HAS_CLIENT_CTX else "")
     + "rag_retrieve, search_web, build_report, now. "
-    "Si l'utilisateur fournit un JSON de variables, commence par predict_credit. "
+    "Respecte le contrat de prediction. "
     "Sois concis et cite les sources [C] (client), [D#] (docs) / [W#] (web) si tu utilises RAG/Web."
 )
 
@@ -167,7 +160,7 @@ def create_multitask_agent(use_web=True, system_prompt="") -> AgentExecutor:
 
     prompt = ChatPromptTemplate.from_messages(
         [
-            ("system", _SYSTEM + SAFETY + " " + system_prompt),
+            ("system", _SYSTEM + SAFETY + " " + system_prompt + " " + CONTRACT),
             MessagesPlaceholder("chat_history"),
             ("human", "{input}"),
             MessagesPlaceholder("agent_scratchpad"),

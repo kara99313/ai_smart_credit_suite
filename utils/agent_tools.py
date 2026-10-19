@@ -97,6 +97,10 @@ def predict_credit_tool(payload_json: str) -> str:
     try:
         if not isinstance(payload, dict) or not payload:
             return "ERROR: Objet JSON client non vide requis."
+        from utils.credit_agent_contract import payload_error
+        error = payload_error(payload)
+        if error:
+            return error
         res = _validate_prediction_response(predict_credit_api(payload, timeout=30.0))
         pdv = float(res.get("pd", 0.0))
         score = int(res.get("score_1000", 0))

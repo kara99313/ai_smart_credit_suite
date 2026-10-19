@@ -18,6 +18,11 @@ def safe_text(value, limit=2000):
 
 
 def run_agent_once(agent, user_query, chat_history):
+    from utils.credit_agent_contract import user_values, preflight, prediction_scope
+    values = user_values(user_query, chat_history)
+    reply = preflight(user_query, values)
+    if reply:
+        return dict(output=reply, intermediate_steps=[], artifacts=[])
     from uuid import uuid4
     from time import monotonic, sleep
     from random import uniform
@@ -31,8 +36,9 @@ def run_agent_once(agent, user_query, chat_history):
         telemetry.begin_attempt(attempt)
         stage = "AgentExecutor.invoke"
         try:
-            result = agent.invoke({"input": user_query, "chat_history": chat_history},
-                                  config={"callbacks": [progress]})
+            with prediction_scope(values):
+                result = agent.invoke({"input": user_query, "chat_history": chat_history},
+                                      config={"callbacks": [progress]})
             stage = "run_agent_once.result"
             presented = _present_result(result)
         except Exception as error:
