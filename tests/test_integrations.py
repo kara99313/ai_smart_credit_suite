@@ -19,7 +19,7 @@ HTML='<a href="https://example.org/news" class="result__a"><b>Actual</b> title</
 
 
 def response(body=HTML,status=200):
-    result=Mock(text=body,status_code=status,headers={})
+    result=Mock(text=body,content=body.encode("utf-8"),status_code=status,headers={})
     if status>=400: result.raise_for_status.side_effect=requests.HTTPError('PRIVATE')
     return result
 

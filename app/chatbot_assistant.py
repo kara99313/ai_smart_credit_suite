@@ -44,6 +44,7 @@ def _handle_commands(text: str) -> bool:
     t = text.strip().lower()
     if t == "/reset":
         st.session_state.assistant_msgs = []
+        st.session_state["assistant_results"] = []
         st.session_state.agent = None
         st.toast("Historique effacé.", icon="🗑️")
         st.rerun()
@@ -84,6 +85,8 @@ def main():
 
     user_msg = st.chat_input("Pose ta question… (ex : ‘Calcule la PD et la note pour DTI=0.4…’) ")
     if not user_msg:
+        from utils.agents import render_agent_results
+        render_agent_results("assistant")
         return
     if _handle_commands(user_msg):
         return
@@ -111,20 +114,12 @@ def main():
             from utils.agents import run_agent_once
             from utils.multitask_agent import as_messages
             out = run_agent_once(st.session_state.agent, query, as_messages(chat_history))
-            from utils.agents import render_report_downloads
-            render_report_downloads(out)
+            from utils.agents import remember_agent_result
+            remember_agent_result(out, "assistant")
             answer = out.get("output", "")
             st.session_state.assistant_msgs.append(("assistant", answer))
             st.chat_message("assistant").markdown(answer)
 
-            steps = out.get("intermediate_steps", []) or []
-            if steps:
-                with st.expander("🧩 Étapes & outils utilisés"):
-                    for i, (action, observation) in enumerate(steps, 1):
-                        st.markdown(f"**Étape {i}: tool → `{getattr(action, 'tool', 'n/a')}`**")
-                        st.code(str(getattr(action, 'tool_input', '')), language="json")
-                        st.markdown("**Observation**")
-                        st.write(observation if isinstance(observation, str) else str(observation)[:2000])
         except Exception as e:
             msg = f"Erreur agent : {e}"
             st.session_state.assistant_msgs.append(("assistant", msg))
@@ -169,6 +164,9 @@ def main():
         if web_ctx:
             with st.expander("🔗 Sources Web"):
                 st.markdown(web_ctx)
+
+    from utils.agents import render_agent_results
+    render_agent_results("assistant")
 
 if __name__ == "__main__":
     main()

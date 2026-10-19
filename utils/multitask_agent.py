@@ -179,6 +179,7 @@ def create_multitask_agent(use_web=True, system_prompt="") -> AgentExecutor:
     # LangChain 0.3.x : early_stopping_method="generate" n'est plus supporté
     return AgentExecutor(
         agent=agent,
+        stream_runnable=False,
         tools=tools,
         verbose=False,
         handle_parsing_errors=True,

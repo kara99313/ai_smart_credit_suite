@@ -1,6 +1,6 @@
 """Focused Web provider, filtering and agent compatibility tests."""
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, PropertyMock, patch
 import requests
 from utils import web_search as web
 
@@ -202,3 +202,67 @@ class TavilyTests(unittest.TestCase):
         self.assertEqual(hits, [])
         self.assertEqual(hits.provider, 'Tavily')
         ddg.assert_not_called()
+
+
+class WebEvidenceQualityTests(unittest.TestCase):
+    def response(self, content, content_type='text/html', status=200, **headers):
+        response = requests.Response()
+        response.status_code = status
+        response._content = content
+        response.encoding = 'utf-8'
+        response.headers.update({'Content-Type': content_type, **headers})
+        return response
+
+    def fetch(self, responses):
+        with patch.object(web, 'web_configuration', return_value=CONFIG), patch.object(web.requests, 'get', side_effect=responses):
+            return web.fetch_and_clean('https://bceao.int/report')
+
+    def test_non_text_never_reaches_html_parser_or_text_decoder(self):
+        for content, kind in [(b'%PDF-1.7 endobj', 'application/pdf'), (b'%PDF-1.7', 'text/html'),
+                              (b'abc\x00\x01binary', 'text/html'), (b'PNG', 'image/png')]:
+            with self.subTest(kind=kind, content=content), patch.object(web, '_PageTextParser') as parser, patch.object(requests.Response, 'text', new_callable=PropertyMock) as text:
+                self.assertEqual(self.fetch([self.response(content, kind)]), '')
+                parser.assert_not_called()
+                text.assert_not_called()
+
+    def test_redirect_to_pdf(self):
+        self.assertEqual(self.fetch([self.response(b'', status=302, Location='/final.pdf'),
+                                     self.response(b'%PDF-1.7', 'application/pdf')]), '')
+
+    def test_structural_cleanup_and_priority(self):
+        for main in ['<main>Vrai contenu utile.</main>', '<article>Vrai contenu utile.</article>',
+                     '<div role="main">Vrai contenu utile.</div>']:
+            page = ('<html><body><a href="#content">Skip to main content</a>'
+                    '<div class="site-menu">Home Contact Login</div><p>Autre texte.</p>' + main +
+                    '<div role="navigation">Navigation parasite</div><footer>Privacy</footer></body></html>')
+            self.assertEqual(self.fetch([self.response(page.encode())]), 'Vrai contenu utile.')
+
+    def test_plain_html_unchanged_and_unstructured_fallback(self):
+        self.assertEqual(self.fetch([self.response(b'<html><body><h1>Titre</h1><p>Texte utile.</p></body></html>')]), 'Titre Texte utile.')
+
+    def test_pdf_falls_back_to_clean_snippet(self):
+        hit = dict(title='Rapport', href='https://bceao.int/report', body='Extrait fournisseur propre.')
+        with patch.object(web, 'web_configuration', return_value=CONFIG), patch.object(web.requests, 'get', return_value=self.response(b'%PDF-1.7', 'application/pdf')):
+            text = web.build_web_context([hit], fetch_full=True)
+        self.assertIn(hit['body'], text)
+        self.assertNotIn('%PDF', text)
+
+    def test_shared_quality_gate_and_metadata_budgets(self):
+        pollutants = ['%PDF-1.7', 'endobj', 'ViewerPreferences', 'abc\x00def', '<p>HTML</p>',
+                      '&lt;div&gt;HTML', 'Home Menu Contact Login', 'Access denied ' * 20]
+        for fetch in [False, True]:
+            for pollutant in pollutants:
+                hit = dict(title='Rapport', href='https://bceao.int/report', body=pollutant)
+                with self.subTest(fetch=fetch, pollutant=pollutant), patch.object(web, 'fetch_and_clean', return_value=pollutant):
+                    text = web.build_web_context([hit], fetch_full=fetch)
+                self.assertNotIn(pollutant, text)
+                self.assertIn('Aucun extrait exploitable', text)
+                for metadata in ['[W1]', hit['title'], hit['href']]:
+                    self.assertIn(metadata, text)
+        hits = [dict(title='Rapport', href='https://bceao.int/' + str(i), body='Contenu utile ' * 100) for i in range(3)]
+        for budget in [1, 150, 2200]:
+            text = web.build_web_context(hits, max_chars_total=budget)
+            for i in range(1, 4):
+                self.assertIn(f'[W{i}]', text)
+            if budget >= 150:
+                self.assertLessEqual(len(text), budget)

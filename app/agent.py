@@ -34,19 +34,25 @@ def main():
                 msgs = as_messages(st.session_state.agent_history[:-1])
                 from utils.agents import run_agent_once
                 out = run_agent_once(agent, user_msg, msgs)
-                from utils.agents import render_report_downloads
-                render_report_downloads(out)
+                from utils.agents import remember_agent_result
+                remember_agent_result(out, "agent")
                 answer = out["output"] if isinstance(out, dict) and "output" in out else str(out)
             except Exception as e:
-                from utils.llm_runtime import explain
-                answer = f"Erreur agent : {explain(e)}"
+                from utils.agent_diagnostics import AgentExecutionError, log_agent_failure, public_message
+                if not isinstance(e, AgentExecutionError):
+                    log_agent_failure(e, "app.agent")
+                answer = f"Erreur agent : {public_message(e)}"
 
             st.session_state.agent_history.append(("assistant", answer))
             st.chat_message("assistant").markdown(answer)
 
+        from utils.agents import render_agent_results
+        render_agent_results("agent")
+
         with st.expander("🧹 Effacer l'historique"):
             if st.button("Reset", use_container_width=True):
                 st.session_state.agent_history = []
+                st.session_state["agent_results"] = []
                 st.rerun()
 
     with col_help:
@@ -54,7 +60,7 @@ def main():
         st.write("- **predict_credit** : PD, score (0–1000), rating, décision")
         st.write("- **rag_retrieve** : passages des documents internes (k=3, tronqués)")
         st.write("- **search_web** : résultats web (résumé court)")
-        st.write("- **build_report** : génère un **HTML** de rapport (tronqué)")
+        st.write("- **build_report** : génère un rapport HTML complet à télécharger")
         st.write("- **now** : heure actuelle")
 
         st.markdown("#### Exemple JSON pour `predict_credit`")

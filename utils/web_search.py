@@ -305,17 +305,94 @@ def fetch_and_clean(url: str, max_chars: int = 2800, timeout: float = DEFAULT_TI
         else:
             return ""
         r.raise_for_status()
+        if not _text_response(r):
+            return ""
         txt = r.text
     except Exception:
         return ""
-    # Retire scripts/styles et balises
-    txt = re.sub(r"(?is)<script.*?>.*?</script>", " ", txt)
-    txt = re.sub(r"(?is)<style.*?>.*?</style>", " ", txt)
-    txt = re.sub(r"(?is)<[^>]+>", " ", txt)
-    txt = _clean_text(txt)
-    if len(txt) > max_chars:
-        txt = txt[:max_chars] + "…"
-    return txt
+    parser = _PageTextParser()
+    try:
+        parser.feed(txt)
+    except Exception:
+        return ""
+    text = _clean_text(" ".join(parser.preferred_parts()))
+    return text[:max_chars] if _safe_excerpt(text) else ""
+
+
+def _text_response(response) -> bool:
+    """Inspect final response bytes before any text decoding or HTML parsing."""
+    content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type and content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
+        return False
+    raw = response.content
+    return not (b"%PDF-" in raw[:1024] or any(byte < 32 and byte not in (9, 10, 13) for byte in raw))
+
+
+def _safe_excerpt(text: str) -> bool:
+    """Validate both evidence sources before truncation, including provider-only mode."""
+    if not text or re.search(
+        r"%PDF|\bendobj\b|ViewerPreferences|\b(?:xref|endstream)\b|"
+        r"captcha|access denied|verify you are human|just a moment|"
+        r"anomaly\.js|anomaly-modal|challenge-form|"
+        r"<\s*[!/?a-z][^>]*>|&(?:lt|gt|#0*60|#x0*3c);|"
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd]",
+        text, re.IGNORECASE,
+    ):
+        return False
+    navigation = re.findall(
+        r"\b(?:skip to (?:main )?content|menu|home|accueil|navigation|contact|"
+        r"connexion|login|subscribe|newsletter|privacy|cookies|all rights reserved)\b",
+        text, re.IGNORECASE,
+    )
+    return not navigation or sum(len(word.split()) for word in navigation) / max(1, len(text.split())) < 0.35
+
+
+class _PageTextParser(HTMLParser):
+    """Skip structural boilerplate; avoid broad substring filters on content."""
+    VOID = {"br", "hr", "img", "input", "meta", "link", "source", "wbr", "area", "base", "embed", "param", "track", "col"}
+    SKIP = {"script", "style", "nav", "footer", "header", "aside", "form", "noscript", "svg", "template"}
+
+    def __init__(self):
+        super().__init__()
+        self.stack, self.parts = [], []
+        self.main_parts, self.article_parts, self.role_parts = [], [], []
+
+    def preferred_parts(self):
+        for parts in (self.main_parts, self.article_parts, self.role_parts, self.parts):
+            if any(part.strip() for part in parts):
+                return parts
+        return []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        tokens = re.split(r"[\s_-]+", (attrs.get("class", "") + " " + attrs.get("id", "")).lower())
+        skip = (tag in self.SKIP or attrs.get("role") in {"navigation", "contentinfo", "banner"}
+                or bool(set(tokens) & {"newsletter", "cookie", "cookies", "sidebar", "advertisement", "social", "subscribe", "menu", "navbar", "navigation", "footer", "skip"})
+                or (tag == "a" and attrs.get("href", "").lower() in {"#main", "#content", "#main-content", "#maincontent"})
+                or "hidden" in attrs or attrs.get("aria-hidden") == "true")
+        if tag not in self.VOID:
+            self.stack.append((tag, skip or bool(self.stack and self.stack[-1][1]), attrs.get("role") == "main"))
+
+    def handle_startendtag(self, tag, attrs):
+        pass
+
+    def handle_endtag(self, tag):
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                break
+
+    def handle_data(self, data):
+        if (not self.stack or not self.stack[-1][1]) and not re.search(r"skip to (?:main )?content", data, re.IGNORECASE):
+            self.parts.append(data)
+            tags = {item[0] for item in self.stack}
+            if "main" in tags:
+                self.main_parts.append(data)
+            if "article" in tags:
+                self.article_parts.append(data)
+            if any(item[2] for item in self.stack):
+                self.role_parts.append(data)
+
 
 def build_web_context(
     hits: List[Dict[str, str]],
@@ -331,25 +408,22 @@ def build_web_context(
     """
     if not hits:
         return ""
-    parts: List[str] = []
-    budget = max_chars_total
-    for i, h in enumerate(hits, 1):
-        title = (h.get("title") or "").strip()
-        href  = (h.get("href")  or "").strip()
-        body  = (h.get("body")  or "").strip()
-
-        if fetch_full and href:
-            full = fetch_and_clean(href, max_chars=min(900, budget))
-            if full:
+    headers = [f"[W{i}] {(h.get('title') or '').strip()}\n{(h.get('href') or '').strip()}" for i, h in enumerate(hits, 1)]
+    # References remain intact even when their metadata exceeds the soft budget.
+    budget = max(0, max_chars_total - sum(map(len, headers)) - 3 * len(headers))
+    parts = []
+    for index, (h, header) in enumerate(zip(hits, headers)):
+        snippet = (h.get("body") or "").strip()
+        body = _clean_text(snippet) if _safe_excerpt(snippet) and _safe_excerpt(_clean_text(snippet)) else ""
+        if fetch_full and h.get("href"):
+            full = fetch_and_clean(h["href"], max_chars=2800)
+            # Very short / challenge pages are poorer evidence than provider snippets.
+            if len(full) >= 100 and len(full.split()) >= 15 and _safe_excerpt(full):
                 body = full
-
-        block = f"[W{i}] {title}\n{href}\n{body}".strip()
-        if len(block) > budget:
-            block = block[:budget] + "…"
-        parts.append(block)
-        budget -= len(block)
-        if budget <= 0:
-            break
-
-        time.sleep(0.2)  # politesse pour éviter de spammer DDG
+        if not body:
+            body = "Aucun extrait exploitable disponible."
+        allowance = budget // (len(headers) - index)
+        excerpt = body[:allowance]
+        budget -= len(excerpt)
+        parts.append(header + ("\n" + excerpt if excerpt else ""))
     return "\n\n".join(parts)

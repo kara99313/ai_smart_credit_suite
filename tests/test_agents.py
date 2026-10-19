@@ -12,7 +12,7 @@ class AgentTests(unittest.TestCase):
         executor.invoke.return_value={'output':'PD 0%, ACCEPT', 'intermediate_steps':[(NS(tool='predict_credit'),'ERROR: API indisponible')]}
         out=agents.run_agent_once(executor,'score',[])
         self.assertNotIn('ACCEPT',out['output'])
-        self.assertIn('ERROR',out['output'])
+        self.assertEqual(out['intermediate_steps'][0]['status'], 'error')
 
     def test_success_uses_exact_observation(self):
         executor=Mock(invoke=Mock(return_value={'output':'invented','intermediate_steps':[(NS(tool='now'),'2026-10-18 UTC')]}))
