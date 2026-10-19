@@ -151,11 +151,11 @@ def test_exact_production_request_extracts_all_values_and_allows_preflight(caplo
     assert preflight(PRODUCTION_QUERY, values) is None
     agent = Mock(invoke=Mock(return_value={'output': 'ok'}))
     caplog.clear()
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.DEBUG):
         run_agent_once(agent, PRODUCTION_QUERY, [])
     agent.invoke.assert_called_once()
     diagnostic, = [json.loads(record.getMessage().partition('Agent preflight ')[2])
-                   for record in caplog.records if record.getMessage().startswith('Agent preflight ')]
+                   for record in caplog.records if record.levelno == logging.DEBUG and record.getMessage().startswith('Agent preflight ')]
     assert diagnostic['preflight_executed'] is True
     assert diagnostic['recognized_features_count'] == 15
     assert diagnostic['missing_features_count'] == 0

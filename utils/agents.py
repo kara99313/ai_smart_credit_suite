@@ -22,7 +22,7 @@ def run_agent_once(agent, user_query, chat_history):
     from uuid import uuid4
     from utils.agent_preflight_diagnostics import log_runtime, preflight_diagnostics
     request_id = uuid4().hex
-    log_runtime(request_id)
+    log_runtime()
     values = user_values(user_query, chat_history)
     with preflight_diagnostics(request_id, values, chat_history) as diagnostic:
         reply = preflight(user_query, values)
