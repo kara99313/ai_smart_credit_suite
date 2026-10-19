@@ -19,15 +19,19 @@ def safe_text(value, limit=2000):
 
 def run_agent_once(agent, user_query, chat_history):
     from utils.credit_agent_contract import user_values, preflight, prediction_scope
+    from uuid import uuid4
+    from utils.agent_preflight_diagnostics import log_runtime, preflight_diagnostics
+    request_id = uuid4().hex
+    log_runtime(request_id)
     values = user_values(user_query, chat_history)
-    reply = preflight(user_query, values)
+    with preflight_diagnostics(request_id, values, chat_history) as diagnostic:
+        reply = preflight(user_query, values)
+        diagnostic['invoke_allowed'] = not bool(reply)
     if reply:
         return dict(output=reply, intermediate_steps=[], artifacts=[])
-    from uuid import uuid4
     from time import monotonic, sleep
     from random import uniform
     from utils.agent_robustness import ToolProgress, retryable_network_error, log_attempt
-    request_id = uuid4().hex
     from utils.agent_telemetry import AgentTelemetry
     telemetry = AgentTelemetry(request_id, agent)
     progress = ToolProgress(telemetry)

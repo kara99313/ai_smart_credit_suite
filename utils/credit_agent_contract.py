@@ -76,14 +76,21 @@ def missing_reply(missing):
 
 
 def preflight(query, values):
+    from utils.agent_preflight_diagnostics import mark_preflight
+    mark_preflight()
     text = ''.join(c for c in unicodedata.normalize('NFKD', query.lower()) if not unicodedata.combining(c))
     question = re.search(r'quelles?|quels?|what|which|liste|list\b', text)
     if question and re.search(r'variable|champ|field|input|parametre', text) and not supplied_values(query):
+        mark_preflight('schema_question')
         return CONTRACT.split('Ne jamais')[0].strip()
     if re.search(r'predict|predi|scor|calcul.*credit', text) or supplied_values(query):
         missing = missing_values(values)
         if missing:
+            mark_preflight('missing_features')
             return missing_reply(missing)
+        mark_preflight('complete_features')
+    else:
+        mark_preflight('unrecognized_request')
     return None
 
 
