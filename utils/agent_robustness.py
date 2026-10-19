@@ -37,7 +37,8 @@ class ToolProgress(BaseCallbackHandler):
     run_inline = True
     raise_error = True
 
-    def __init__(self):
+    def __init__(self, telemetry=None):
+        self.telemetry = telemetry
         self.tool_started = False
         self.started = {}
         self.observations = []
@@ -46,15 +47,22 @@ class ToolProgress(BaseCallbackHandler):
     def on_tool_start(self, serialized, input_str, *, run_id, **kwargs):
         self.tool_started = True
         self.started[run_id] = dict(name=(serialized or {}).get('name', 'outil'), state='pending')
+        if self.telemetry:
+            self.telemetry.start_tool(run_id, self.started[run_id]['name'])
 
     def on_tool_end(self, output, *, run_id, **kwargs):
         entry = self.started[run_id]
         entry['state'] = 'confirmed'
         self.observations.append((entry['name'], getattr(output, 'content', output)))
+        if self.telemetry:
+            from utils.agent_telemetry import tool_status
+            self.telemetry.end_tool(run_id, tool_status(entry['name'], output))
 
     def on_tool_error(self, error, *, run_id, **kwargs):
         self.started[run_id]['state'] = 'error'
         self.errors.append(run_id)
+        if self.telemetry:
+            self.telemetry.end_tool(run_id, 'error')
 
     def steps(self):
         return [(SimpleNamespace(tool=name, tool_input=''), observation)

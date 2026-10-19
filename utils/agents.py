@@ -22,10 +22,13 @@ def run_agent_once(agent, user_query, chat_history):
     from time import monotonic, sleep
     from random import uniform
     from utils.agent_robustness import ToolProgress, retryable_network_error, log_attempt
-    progress = ToolProgress()
     request_id = uuid4().hex
+    from utils.agent_telemetry import AgentTelemetry
+    telemetry = AgentTelemetry(request_id, agent)
+    progress = ToolProgress(telemetry)
     started = monotonic()
     for attempt in (1, 2):
+        telemetry.begin_attempt(attempt)
         stage = "AgentExecutor.invoke"
         try:
             result = agent.invoke({"input": user_query, "chat_history": chat_history},
@@ -36,6 +39,7 @@ def run_agent_once(agent, user_query, chat_history):
             retry = (stage == "AgentExecutor.invoke" and attempt == 1
                      and not progress.tool_started and retryable_network_error(error))
             delay = 1 + uniform(0, .250) if retry else 0
+            telemetry.end_attempt('retry' if retry else 'error')
             log_attempt(agent, request_id, attempt, stage, progress, monotonic() - started,
                         "retry" if retry else "retry interdit" if progress.tool_started else "abandon",
                         error=error, delay=delay)
@@ -43,6 +47,7 @@ def run_agent_once(agent, user_query, chat_history):
                 sleep(delay)
                 continue
             if progress.tool_started:
+                telemetry.run('error')
                 partial = _present_result({"intermediate_steps": progress.steps(), "output": "Interruption."})
                 notices = ["Agent interrompu ; aucune relance automatique. Aucune synthese disponible."]
                 for entry in progress.started.values():
@@ -52,7 +57,10 @@ def run_agent_once(agent, user_query, chat_history):
                                        f"{safe_text(entry['name'], 100)} : outil termine en erreur ; resultat non confirme.")
                 partial["output"] = "\n\n".join(notices + ([partial["output"]] if progress.observations else []))
                 return partial
+            telemetry.run('error')
             raise AgentExecutionError("Agent indisponible : " + public_message(error)) from error
+        telemetry.end_attempt('success')
+        telemetry.run('success')
         log_attempt(agent, request_id, attempt, stage, progress, monotonic() - started,
                     "success_after_retry" if attempt == 2 else "success")
         return presented
