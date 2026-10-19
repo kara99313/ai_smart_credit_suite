@@ -338,7 +338,7 @@ def _on_startup():
 # ===== Routes =====
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": True, "model_path": str(MODEL_PATH), "features": FEATURES}
+    return {"status": "ok", "model_loaded": True}
 
 @app.get("/api/predict_ping")
 def predict_ping():
@@ -465,38 +465,3 @@ def tools_explain(body: ExplainPayload, top_k: int = Query(10, ge=1, le=30)):
         raise
     except Exception as error:
         raise HTTPException(status_code=500, detail="Operation indisponible ; reessayer plus tard.") from None
-
-# ===== Debug utiles =====
-@app.get("/debug/imports")
-def debug_imports():
-    out = {}
-    for m in ["numpy","pandas","sklearn","torch","transformers","tokenizers","sentence_transformers","faiss","langchain","shap"]:
-        try:
-            mod = __import__(m)
-            ver = getattr(mod, "__version__", "n/a")
-            out[m] = {"ok": True, "version": ver}
-        except Exception as e:
-            out[m] = {"ok": False, "error": "Module indisponible ou incompatible."}
-    out["sys_executable"] = sys.executable
-    return out
-
-@app.get("/debug/dtypes")
-def debug_dtypes(
-    DTIRatio: float = 0.3,
-    TrustScorePsychometric: float = 0.6,
-    HouseholdSize: int = 3,
-    NumCreditLines: int = 2,
-    Income: float = 100000,
-    CommunityGroupMember: bool = False,
-    HasMortgage: bool = False,
-    MonthsEmployed: int = 12,
-    HasSocialAid: bool = False,
-    MobileMoneyTransactions: int = 10,
-    Age: int = 30,
-    InterestRate: float = 10.0,
-    LoanTerm: int = 12,
-    LoanAmount: float = 100000,
-    InformalIncome: float = 0.0,
-):
-    df = _align_df(locals())
-    return {"dtypes": {k: str(v) for k, v in df.dtypes.to_dict().items()}, "row0": df.iloc[0].to_dict()}

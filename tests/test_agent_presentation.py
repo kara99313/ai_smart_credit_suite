@@ -67,11 +67,11 @@ def test_interfaces_reports_survive_rerun_without_history_html(file, namespace, 
         assert 'REPORT_PRIVATE' not in str(executor.invoke.call_args)
 
 
-def test_web_structural_cleanup():
+def test_web_direct_fetch_is_disabled():
     page = '<html><header>MENU</header><nav>NAV</nav><div class="newsletter">SUBSCRIBE</div><main><article><h1>Titre utile</h1><p>Texte utile.</p></article></main><footer>FOOTER</footer><script>JS</script></html>'
     with patch.object(web, 'web_configuration', return_value=dict(enabled=True, domains=[], timeout=2)), patch.object(web.requests, 'get', return_value=Mock(status_code=200, text=page, content=page.encode(), headers={})):
         text = web.fetch_and_clean('https://example.org')
-    assert text == 'Titre utile Texte utile.'
+    assert text == ''
 
 
 @pytest.mark.parametrize('full', ['', 'Menu seulement', 'Access denied ' * 30])
@@ -85,11 +85,11 @@ def test_web_fallback_and_metadata_budget(full):
     assert len(text) <= 220
 
 
-def test_web_uses_good_cleaned_content():
+def test_web_ignores_full_content_and_uses_provider_snippet():
     with patch.object(web, 'fetch_and_clean', return_value='Contenu nettoy? pertinent ' * 30):
         text = web.build_web_context([dict(title='Titre', href='https://example.org', body='Fournisseur')], fetch_full=True)
-    assert 'Contenu nettoy?' in text
-    assert 'Fournisseur' not in text
+    assert 'Contenu nettoy?' not in text
+    assert 'Fournisseur' in text
 
 
 @pytest.mark.parametrize('fetch', [False, True])

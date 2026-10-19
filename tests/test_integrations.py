@@ -28,6 +28,7 @@ def button(app,label):
     return next(b for b in app.button if b.label==label)
 
 
+@authenticated_admin_test
 class SettingsIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
@@ -117,7 +118,7 @@ class WebIntegrationTests(unittest.TestCase):
         redirect=response(status=302);redirect.headers={'Location':'https://evil.net/private'}
         with patch.object(web,'web_configuration',return_value=dict(WEB,domains=['example.org'])),patch.object(web.requests,'get',return_value=redirect) as get:
             self.assertEqual(web.fetch_and_clean('https://example.org/a'),'')
-        self.assertEqual(get.call_count,1);self.assertFalse(get.call_args.kwargs['allow_redirects'])
+        get.assert_not_called()
 
     def test_fetch_disabled_or_disallowed_never_contacts_service(self):
         for config,url in ((dict(WEB,enabled=False),'https://example.org'),(dict(WEB,domains=['bis.org']),'https://example.org')):
@@ -125,9 +126,9 @@ class WebIntegrationTests(unittest.TestCase):
                 self.assertEqual(web.fetch_and_clean(url),'')
             get.assert_not_called()
 
-    def test_fetch_cleans_actual_html(self):
+    def test_fetch_ignores_source_html(self):
         with patch.object(web,'web_configuration',return_value=WEB),patch.object(web.requests,'get',return_value=response('<script>hidden()</script><p>Useful text</p>')):
-            self.assertEqual(web.fetch_and_clean('https://example.org'),'Useful text')
+            self.assertEqual(web.fetch_and_clean('https://example.org'),'')
 
 
 @authenticated_admin_test

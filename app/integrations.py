@@ -1,7 +1,7 @@
 # app/integrations.py
 from __future__ import annotations
 import streamlit as st
-from utils.admin_auth import is_admin
+from utils.admin_auth import is_admin, require_admin
 from utils.api_client import predict_credit_api
 from utils import health_diagnostics as checks
 from utils.runtime_config import backend_url
@@ -127,9 +127,10 @@ def _web_tab():
     with st.form('web_settings'):
         enable = st.toggle('Activer la recherche Web', value=cfg.enable_web_search)
         domains = st.text_area('Domaines autorises (un par ligne)', value='\n'.join(cfg.allowed_domains))
-        saved = st.form_submit_button('Enregistrer les parametres Web')
+        saved = st.form_submit_button('Enregistrer les parametres Web', disabled=not is_admin())
     if saved:
         try:
+            require_admin()
             cfg.allowed_domains = normalize_domains([d.strip() for d in domains.splitlines() if d.strip()])
             cfg.enable_web_search = bool(enable)
             save_settings(cfg)

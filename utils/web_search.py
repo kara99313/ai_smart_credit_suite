@@ -285,38 +285,8 @@ def search_web(query: str, max_results: int = 3, region: str = "fr-fr") -> List[
 
 
 def fetch_and_clean(url: str, max_chars: int = 2800, timeout: float = DEFAULT_TIMEOUT) -> str:
-    """
-    Télécharge une page et renvoie un texte brut court (sans dépendances externes).
-    """
-    config = web_configuration()
-    if not config['enabled'] or not _allowed_url(url, config['domains']):
-        return ""
-    timeout = min(float(timeout), config['timeout'])
-    try:
-        # Check every redirect against the same domain policy before fetching it.
-        for _ in range(5):
-            r = requests.get(url, headers=UA, timeout=timeout, allow_redirects=False)
-            if not 300 <= r.status_code < 400:
-                break
-            from urllib.parse import urljoin
-            url = urljoin(url, r.headers.get("Location", ""))
-            if not _allowed_url(url, config['domains']):
-                return ""
-        else:
-            return ""
-        r.raise_for_status()
-        if not _text_response(r):
-            return ""
-        txt = r.text
-    except Exception:
-        return ""
-    parser = _PageTextParser()
-    try:
-        parser.feed(txt)
-    except Exception:
-        return ""
-    text = _clean_text(" ".join(parser.preferred_parts()))
-    return text[:max_chars] if _safe_excerpt(text) else ""
+    """Compatibility stub: source-page downloads are disabled, including direct calls."""
+    return ""
 
 
 def _text_response(response) -> bool:
@@ -406,6 +376,7 @@ def build_web_context(
       URL
       Extrait
     """
+    # fetch_full is retained for callers; only provider snippets are used.
     if not hits:
         return ""
     headers = [f"[W{i}] {(h.get('title') or '').strip()}\n{(h.get('href') or '').strip()}" for i, h in enumerate(hits, 1)]
@@ -415,11 +386,6 @@ def build_web_context(
     for index, (h, header) in enumerate(zip(hits, headers)):
         snippet = (h.get("body") or "").strip()
         body = _clean_text(snippet) if _safe_excerpt(snippet) and _safe_excerpt(_clean_text(snippet)) else ""
-        if fetch_full and h.get("href"):
-            full = fetch_and_clean(h["href"], max_chars=2800)
-            # Very short / challenge pages are poorer evidence than provider snippets.
-            if len(full) >= 100 and len(full.split()) >= 15 and _safe_excerpt(full):
-                body = full
         if not body:
             body = "Aucun extrait exploitable disponible."
         allowance = budget // (len(headers) - index)

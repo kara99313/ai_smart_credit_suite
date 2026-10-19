@@ -1,7 +1,7 @@
 """Explicit, isolated, read-only health probes; never build an index on page load."""
 from pathlib import Path
 import streamlit as st
-from utils.admin_auth import is_admin
+from utils.admin_auth import is_admin, render_gate
 from utils.runtime_config import ROOT, backend_url
 from utils import health_diagnostics as checks
 
@@ -18,6 +18,8 @@ def show(label,probe):
 
 def main():
     st.title('Health Check')
+    if not render_gate():
+        return
     st.caption('Configure seulement = configuration presente ; Disponible = ressource joignable/chargeable ; Fonctionnel = test minimal reel reussi. Non teste ne signifie pas en panne.')
     env=checks.environment_inventory(PROJECT_ROOT)
     st.subheader('Environnement et configuration (aucun appel externe)')

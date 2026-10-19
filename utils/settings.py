@@ -218,6 +218,8 @@ def save_settings(cfg: AppSettings) -> None:
     """
     Sauvegarde les paramètres (hors secrets API).
     """
+    from utils.admin_auth import require_admin
+    require_admin()
     _ensure_data_dir()
     payload: Dict[str, Any] = asdict(cfg)
     # On ne sauvegarde pas les clés API dans le fichier
@@ -229,6 +231,8 @@ def save_settings(cfg: AppSettings) -> None:
 
 def update_settings(patch: Dict[str, Any]) -> AppSettings:
     """Met à jour certains paramètres et les sauvegarde."""
+    from utils.admin_auth import require_admin
+    require_admin()
     cur = get_settings()
     base = asdict(cur)
     base = _deep_update(base, patch or {})

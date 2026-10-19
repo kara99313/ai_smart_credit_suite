@@ -130,7 +130,10 @@ def test_other_pages_disable_provider_tests(monkeypatch, filename, label):
     with patch.object(health, 'build_client') as build:
         app = AppTest.from_file(str(ROOT / 'app' / filename), default_timeout=30).run()
         assert not app.exception
-        assert next(b for b in app.button if b.label == label).disabled
+        if filename == 'health_check.py':
+            assert not any(b.label == label for b in app.button)
+        else:
+            assert next(b for b in app.button if b.label == label).disabled
         build.assert_not_called()
 
 

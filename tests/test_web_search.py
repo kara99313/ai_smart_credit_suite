@@ -229,16 +229,16 @@ class WebEvidenceQualityTests(unittest.TestCase):
         self.assertEqual(self.fetch([self.response(b'', status=302, Location='/final.pdf'),
                                      self.response(b'%PDF-1.7', 'application/pdf')]), '')
 
-    def test_structural_cleanup_and_priority(self):
+    def test_source_html_is_not_retrieved(self):
         for main in ['<main>Vrai contenu utile.</main>', '<article>Vrai contenu utile.</article>',
                      '<div role="main">Vrai contenu utile.</div>']:
             page = ('<html><body><a href="#content">Skip to main content</a>'
                     '<div class="site-menu">Home Contact Login</div><p>Autre texte.</p>' + main +
                     '<div role="navigation">Navigation parasite</div><footer>Privacy</footer></body></html>')
-            self.assertEqual(self.fetch([self.response(page.encode())]), 'Vrai contenu utile.')
+            self.assertEqual(self.fetch([self.response(page.encode())]), '')
 
-    def test_plain_html_unchanged_and_unstructured_fallback(self):
-        self.assertEqual(self.fetch([self.response(b'<html><body><h1>Titre</h1><p>Texte utile.</p></body></html>')]), 'Titre Texte utile.')
+    def test_plain_html_download_is_disabled(self):
+        self.assertEqual(self.fetch([self.response(b'<html><body><h1>Titre</h1><p>Texte utile.</p></body></html>')]), '')
 
     def test_pdf_falls_back_to_clean_snippet(self):
         hit = dict(title='Rapport', href='https://bceao.int/report', body='Extrait fournisseur propre.')
