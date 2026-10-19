@@ -45,13 +45,19 @@ def supplied_values(text):
     """Only explicit named scalar values are collected, never inferred."""
     values = _natural_values(text)
     names = '|'.join((*FEATURES, 'threshold'))
-    pattern = r'["\x27]?\b(' + names + r')\b["\x27]?\s*[:=]\s*("[^"\n]*"|\x27[^\x27\n]*\x27|true\b|false\b|null\b|oui\b|non\b|yes\b|no\b|[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)(?![\w.]|,\d)'
+    pattern = r'["\x27]?\b(' + names + r')\b["\x27]?\s*[:=]\s*("[^"\n]*"|\x27[^\x27\n]*\x27|true\b|false\b|null\b|oui\b|non\b|yes\b|no\b|[-+]?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?)(?!\w|[.,]\d|\.\S|\s*\d)'
     for match in re.finditer(pattern, str(text), re.I):
         name = next(n for n in (*FEATURES, 'threshold') if n.lower() == match[1].lower())
+        raw = match[2]
+        # Keep ambiguous thousands-style tokens unparsed; never truncate them.
+        if re.fullmatch(r'[-+]?[1-9]\d{0,2},\d{3}', raw):
+            continue
+        if re.fullmatch(r'[-+]?\d+,\d+(?:[eE][-+]?\d+)?', raw):
+            raw = raw.replace(',', '.')
         try:
-            value = json.loads(match[2])
+            value = json.loads(raw)
         except ValueError:
-            value = match[2].strip(chr(34) + chr(39))
+            value = raw.strip(chr(34) + chr(39))
         values[name] = value
     return values
 

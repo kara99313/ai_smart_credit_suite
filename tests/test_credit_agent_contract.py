@@ -126,3 +126,97 @@ def test_french_partial_prediction_requests_only_missing_values():
         'MonthsEmployed', 'HasSocialAid', 'MobileMoneyTransactions', 'InterestRate',
         'LoanTerm', 'InformalIncome',
     }
+
+
+PRODUCTION_QUERY = ('DTIRatio = 0,35 ; TrustScorePsychometric = 0,62 ; HouseholdSize = 4 ; '
+    'NumCreditLines = 2 ; Income = 300000 ; CommunityGroupMember = Yes ; HasMortgage = No ; '
+    'MonthsEmployed = 36 ; HasSocialAid = No ; MobileMoneyTransactions = 20 ; Age = 32 ; '
+    'InterestRate = 12 ; LoanTerm = 24 ; LoanAmount = 100000 ; InformalIncome = 50000.')
+PRODUCTION_VALUES = dict(DTIRatio=.35, TrustScorePsychometric=.62, HouseholdSize=4,
+    NumCreditLines=2, Income=300000, CommunityGroupMember='Yes', HasMortgage='No',
+    MonthsEmployed=36, HasSocialAid='No', MobileMoneyTransactions=20, Age=32,
+    InterestRate=12, LoanTerm=24, LoanAmount=100000, InformalIncome=50000)
+
+
+def test_exact_production_request_extracts_all_values_and_allows_preflight(caplog):
+    from utils.credit_agent_contract import missing_values, preflight, payload_error
+    import logging
+    values = user_values(PRODUCTION_QUERY, [])
+    recognized_features_count = sum(name in values for name in FEATURES)
+    missing_features_count = len(missing_values(values))
+    assert recognized_features_count == 15
+    assert missing_features_count == 0
+    assert values == PRODUCTION_VALUES
+    assert 'threshold' not in values
+    assert preflight(PRODUCTION_QUERY, values) is None
+    agent = Mock(invoke=Mock(return_value={'output': 'ok'}))
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        run_agent_once(agent, PRODUCTION_QUERY, [])
+    agent.invoke.assert_called_once()
+    diagnostic, = [json.loads(record.getMessage().partition('Agent preflight ')[2])
+                   for record in caplog.records if record.getMessage().startswith('Agent preflight ')]
+    assert diagnostic['preflight_executed'] is True
+    assert diagnostic['recognized_features_count'] == 15
+    assert diagnostic['missing_features_count'] == 0
+    assert diagnostic['history_messages_count'] == 0
+    assert diagnostic['reason'] == 'complete_features'
+    assert diagnostic['invoke_allowed'] is True
+    with prediction_scope(values):
+        assert payload_error(PRODUCTION_VALUES) is None
+        assert payload_error(dict(PRODUCTION_VALUES, Income=300001)) is not None
+
+
+@pytest.mark.parametrize('separator', [' = ', ': '])
+@pytest.mark.parametrize('decimal_separator', [',', '.'])
+def test_production_values_preserve_named_formats(separator, decimal_separator):
+    query = PRODUCTION_QUERY.replace(' = ', separator)
+    if decimal_separator == '.':
+        query = query.replace('0,35', '0.35').replace('0,62', '0.62')
+    assert user_values(query, []) == PRODUCTION_VALUES
+
+
+@pytest.mark.parametrize('query,expected', [
+    ('DTIRatio=0,35', {'DTIRatio': .35}),
+    ('TrustScorePsychometric: 0,62', {'TrustScorePsychometric': .62}),
+    ('InformalIncome=50000.', {'InformalIncome': 50000}),
+    ('DTIRatio=0,350', {'DTIRatio': .350}),
+    ('Income=1,000', {}),
+    ('Income=12,345', {}),
+    ('Income=300,000', {}),
+    ('Income=1,000,000', {}),
+    ('Income=12oops', {}),
+    ('Income=12.34oops', {}),
+    ('Income=12,34oops', {}),
+    ('Income=12..34', {}),
+    ('Income=12 000', {}),
+    ('Income=12.34.56', {}),
+    ('Income=12,34,56', {}),
+    ('DTIRatio=0,35 ; threshold: 0,20.', {'DTIRatio': .35, 'threshold': .20}),
+    ('CommunityGroupMember=Yes ; HasMortgage=No ; HasSocialAid=No.',
+     {'CommunityGroupMember': 'Yes', 'HasMortgage': 'No', 'HasSocialAid': 'No'}),
+    ('CommunityGroupMember="oui, explicitement"', {'CommunityGroupMember': 'oui, explicitement'}),
+    ('DTIRatio ; TrustScorePsychometric ; InformalIncome', {}),
+])
+def test_explicit_tokens_are_not_truncated_or_invented(query, expected):
+    assert user_values(query, []) == expected
+
+
+@pytest.mark.parametrize('decimal_separator', [',', '.'])
+def test_existing_natural_french_values_keep_both_decimal_formats(decimal_separator):
+    query = ('Predit le risque de credit pour un client de 32 ans avec un revenu de 300000, '
+             'un montant de pret de 100000, un DTI de 0,35 et un score psychometrique de 0,62.')
+    if decimal_separator == '.':
+        query = query.replace('0,35', '0.35').replace('0,62', '0.62')
+    assert user_values(query, []) == dict(Age=32, Income=300000, LoanAmount=100000,
+                                        DTIRatio=.35, TrustScorePsychometric=.62)
+
+
+def test_production_missing_value_is_not_filled_from_assistant_history():
+    from utils.credit_agent_contract import missing_values, preflight
+    query = PRODUCTION_QUERY.replace(' ; InformalIncome = 50000.', '.')
+    values = user_values(query, [AIMessage('InformalIncome=50000')])
+    assert values == {name: value for name, value in PRODUCTION_VALUES.items() if name != 'InformalIncome'}
+    assert missing_values(values) == ['InformalIncome']
+    assert 'InformalIncome' in preflight(query, values)
+    assert 'threshold' not in values
