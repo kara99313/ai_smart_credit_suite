@@ -23,8 +23,8 @@ def button(app,label):
 
 def observability_page(root):
     script=('import runpy\n'+f"ns=runpy.run_path({str(ROOT/'app/observability.py')!r},run_name='observability_test')\n"
-        +f"ns['main'].__globals__['PRED_LOG']={str(root/'predictions.csv')!r}\n"
-        +f"ns['main'].__globals__['AGENT_LOG']={str(root/'agents.csv')!r}\n"
+        +f"ns['main'].__globals__['PRED_LOG']={str(root/'prediction.db')!r}\n"
+        +f"ns['main'].__globals__['AGENT_LOG']={str(root/'agent.db')!r}\n"
         +"ns['main']()\n")
     return AppTest.from_string(script,default_timeout=30)
 
@@ -118,31 +118,33 @@ class ObservabilityTests(unittest.TestCase):
         self.assertNotIn('UNKNOWN',text);self.assertNotIn('HIDDEN',text)
         self.assertNotIn('HIDDEN',str(audit.redact_details({'smtp_pass':'HIDDEN'})))
 
-    def test_observability_ui_metrics_and_refresh_preserve_all_sources(self):
-        fixtures(self.root/'predictions.csv')
-        write_csv(self.root/'agents.csv',['timestamp','tool'],[['2026-01-01','now']])
+    def test_empty_ui_does_not_invent_service_metrics(self):
+        app=observability_page(self.root).run()
+        self.assertFalse(app.exception);self.assertFalse(app.metric)
+        self.assertEqual(len(app.info),2)
+
+    def test_technical_ui_isolates_sources_and_preserves_database(self):
+        from utils import prediction_telemetry
+        from datetime import datetime, timezone
+        path=self.root/'prediction.db'
+        with patch.object(prediction_telemetry,'STORE_PATH',path):
+            prediction_telemetry.persist(dict(request_id='FAKE_SECRET',
+                timestamp_utc=datetime.now(timezone.utc).isoformat(),duration_ms=12,
+                status='success',error_category=None,model_id='a'*64,
+                origin='business',call_type='api_predict'))
+        (self.root/'agent.db').write_text('FAKE_SECRET prompt <html>')
         before={p:p.read_bytes() for p in self.root.iterdir()}
         with patch('requests.get') as get,patch('requests.post') as post:
             app=observability_page(self.root).run()
-            self.assertFalse(app.exception)
-            values={m.label:m.value for m in app.metric}
-            self.assertEqual(values['Predictions archivees'],'6');self.assertEqual(values['Decisions ACCEPT archivees'],'50.0%')
-            self.assertEqual(values['Succes declares dans le journal'],'Indisponible')
+            self.assertFalse(app.exception);self.assertTrue(app.error)
+            self.assertEqual(next(m.value for m in app.metric if m.label=='Tentatives API'),'1')
             button(app,'Actualiser les journaux').click().run()
         get.assert_not_called();post.assert_not_called()
         for p,raw in before.items():self.assertEqual(p.read_bytes(),raw)
         self.assertFalse(audit.AUDIT_PATH.exists())
-
-    def test_empty_ui_does_not_invent_service_metrics(self):
-        app=observability_page(self.root).run()
-        self.assertFalse(app.exception);self.assertFalse(app.metric)
-        self.assertGreaterEqual(len(app.info),3)
-
-    def test_invalid_agent_csv_is_isolated_from_predictions(self):
-        fixtures(self.root/'predictions.csv');(self.root/'agents.csv').write_text('a,b\nx,y,z\n')
-        app=observability_page(self.root).run()
-        self.assertFalse(app.exception);self.assertTrue(app.error)
-        self.assertEqual(next(m.value for m in app.metric if m.label=='Predictions archivees'),'6')
+        rendered=str(app)
+        for value in ('FAKE_SECRET','<html>','request_id','PD predite','ACCEPT'):
+            self.assertNotIn(value,rendered)
 
     def test_main_navigation_and_service_diagnostic_link(self):
         with patch('requests.get') as get,patch('requests.post') as post:

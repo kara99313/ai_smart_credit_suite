@@ -171,7 +171,7 @@ def test_observability_requires_valid_admin_before_reading(monkeypatch):
     for key, value in CONFIG.items():
         monkeypatch.setenv(key, value)
     auth._FAILURES.clear()
-    with patch('utils.observability_data.prediction_snapshot') as predictions, patch('utils.observability_data.csv_snapshot') as journals:
+    with patch('utils.observability_telemetry.prediction_snapshot') as predictions, patch('utils.observability_telemetry.agent_snapshot') as journals:
         app = AppTest.from_file(str(ROOT / 'app/observability.py')).run()
         assert not app.exception
         assert not app.metric
@@ -184,9 +184,9 @@ def test_observability_requires_valid_admin_before_reading(monkeypatch):
         predictions.assert_not_called()
         journals.assert_not_called()
     # Real grants and the real page gate, with temporary empty sources.
-    with patch('utils.observability_data.prediction_snapshot', return_value={
+    with patch('utils.observability_telemetry.prediction_snapshot', return_value={
             'source': {'state': 'missing', 'size': None}, 'warnings': []}) as predictions, patch(
-            'utils.observability_data.csv_snapshot', return_value={
+            'utils.observability_telemetry.agent_snapshot', return_value={
                 'source': {'state': 'missing', 'size': None}, 'warnings': []}) as journals:
         app.text_input[0].set_value('test-admin')
         app.text_input[1].set_value(PASSWORD)

@@ -1,85 +1,96 @@
-﻿"""Read-only operational journals; availability and coverage are explicit."""
-from __future__ import annotations
+﻿"""Admin-only technical telemetry dashboard."""
 from pathlib import Path
+import pandas as pd
 import streamlit as st
 from utils.admin_auth import render_gate
-from utils.runtime_config import ROOT
-from utils import audit
-from utils.observability_data import prediction_snapshot, csv_snapshot, agent_statistics, safe_frame
+from utils.observability_telemetry import prediction_snapshot, agent_snapshot
 
-PRED_LOG = ROOT / 'data/predictions_log.csv'
-AGENT_LOG = ROOT / 'data/agent_usage.csv'
+ROOT = Path(__file__).resolve().parents[1]
+PRED_LOG = ROOT / 'logs/prediction_telemetry.sqlite3'
+AGENT_LOG = ROOT / 'logs/agent_telemetry.sqlite3'
 
 
 def show_source(snapshot):
-    source = snapshot['source']
-    labels = {'missing': 'Absent', 'unavailable': 'Inaccessible', 'invalid': 'Invalide',
-              'empty': 'Vide', 'available': 'Lisible', 'present': 'Present'}
-    st.caption('Etat du fichier : ' + labels[source['state']] + '. Ce statut ne certifie pas un service.')
-    if source['size'] is not None:
-        st.caption(f"Taille observee : {source['size']} octets. Modification du fichier (UTC) : {source['modified']}.")
-    for warning in snapshot['warnings']:
-        st.warning(warning)
-    if source['state'] in {'invalid', 'unavailable'}:
-        st.error('Journal indisponible ; aucune metrique calculee pour cette source.')
-    elif source['state'] == 'missing':
-        st.info('Journal absent ; aucune observation disponible.')
-    return source['state'] in {'available', 'empty'}
+    state = snapshot['source']['state']
+    if state == 'missing':
+        st.info('Source absente ; aucune observation disponible.')
+    elif state == 'unavailable':
+        st.error('Source indisponible ou incompatible ; aucune métrique calculée.')
+    elif state == 'empty':
+        st.caption('Aucune observation dans la période sélectionnée.')
+    else:
+        st.caption('Source lisible ; ce statut ne certifie pas un service.')
+    return state in {'available', 'empty'}
 
 
-def percentage(value):
-    return f'{value:.1%}' if value is not None else 'Indisponible'
+def metrics(k, fields):
+    columns = st.columns(3)
+    for i, (key, label) in enumerate(fields):
+        value = k[key]
+        if value is None:
+            value = 'Indisponible'
+        elif key == 'success_rate':
+            value = f'{value:.1%}'
+        elif key in ('mean_ms', 'median_ms'):
+            value = f'{value:.1f} ms'
+        else:
+            value = str(value)
+        columns[i % 3].metric(label, value)
+
+
+def daily_chart(rows):
+    if rows:
+        frame = pd.DataFrame(rows).pivot(index='date', columns='status', values='calls').fillna(0)
+        st.bar_chart(frame)
 
 
 def main():
     if not render_gate():
         return
-    st.title('Observabilite et journaux')
-    st.caption('Lecture seule, sans correction des fichiers ni appel externe. Actualiser relit les sources ; aucune absence de mesure ne vaut zero ou succes.')
-    st.button('Actualiser les journaux')  # Streamlit reruns and reloads all snapshots.
-    st.subheader('Journal des predictions archivees')
-    pred = prediction_snapshot(PRED_LOG)
-    if show_source(pred):
-        k = pred['kpis']
-        if k:
-            cols = st.columns(3)
-            cols[0].metric('Predictions archivees', str(k['total']))
-            cols[1].metric('PD predite moyenne', percentage(k['mean_pd']))
-            cols[2].metric('Decisions ACCEPT archivees', percentage(k['acceptance_rate']))
-            st.caption(f"PD valides : {k['valid_pd']} / {k['total']}. Decisions reconnues : {k['recognized_decisions']} / {k['total']}. Dates absentes ou invalides : {k['undated']}. Aucun resultat reel de remboursement n est observe ici.")
-            daily = pred['daily']
-            if not daily.empty:
-                st.line_chart(daily.set_index('date')[['volume', 'mean_pd']])
-            with st.expander('Derniers enregistrements de predictions'):
-                st.dataframe(safe_frame(pred['frame'].drop(columns=[c for c in pred['frame'] if c.startswith('_')]),200), hide_index=True)
-
-    st.caption('Les graphiques regroupent les dates en UTC ; une date historique sans fuseau est interpretee UTC, sans preuve de son fuseau d origine.')
-    st.subheader('Journal d usage des outils agents')
-    st.caption('Fichier optionnel agent_usage.csv. Les parcours agents actuels ne produisent pas ce journal ; sa presence ne prouve pas une instrumentation active ni une couverture exhaustive.')
-    agents = csv_snapshot(AGENT_LOG)
-    if show_source(agents):
-        k = agent_statistics(agents['frame'])
-        cols = st.columns(3)
-        cols[0].metric('Lignes d usage archivees', str(k['total']))
-        cols[1].metric('Succes declares dans le journal', percentage(k['success_rate']))
-        cols[2].metric('Outil le plus archive', k['most_used'] or 'Indisponible')
-        st.caption(f"Succes renseignes (true/false/1/0) : {k['known_success']} / {k['total']}. Inconnus : {k['unknown_success']}. Dates absentes ou invalides : {k['undated']}.")
-        if not k['daily'].empty:
-            st.bar_chart(k['daily'])
-        with st.expander('Enregistrements d usage'):
-            st.caption('Apercu des 300 dernieres lignes du fichier, ordre inverse ; valeurs sensibles masquees.')
-            st.dataframe(safe_frame(agents['frame'].tail(300).iloc[::-1]), hide_index=True)
-
-    st.subheader('Journal d audit de configuration')
-    st.caption('Evenements locaux des actions Administration. L acteur session_non_authentifiee ne constitue pas une identite verifiee. Journal non signe ; aucune garantie d exhaustivite ou d inviolabilite.')
-    events = csv_snapshot(audit.AUDIT_PATH, required_columns=audit.COLUMNS)
-    if show_source(events):
-        st.metric('Lignes d audit archivees', str(len(events['frame'])))
-        if not events['frame'].empty:
-            st.dataframe(safe_frame(events['frame'].tail(300).iloc[::-1]), hide_index=True)
-
-    st.subheader('Journaux applicatifs et etat des services')
-    st.info('Aucun collecteur de logs du serveur ou de Streamlit n est raccorde a cette page. Aucun statut de service, taux d erreur global, latence, cout ou consommation de tokens ne peut etre deduit de ces fichiers.')
+    st.title('Observabilité technique')
+    period = st.selectbox('Période', ['24 heures', '7 jours', '30 jours'], index=2)
+    st.button('Actualiser les journaux')
+    hours = {'24 heures': 24, '7 jours': 168, '30 jours': 720}[period]
+    origin = st.selectbox('Origine API / préchauffages', ['Tous', 'business', 'synthetic'])
+    pred = prediction_snapshot(PRED_LOG, hours=hours, origin=None if origin == 'Tous' else origin)
+    agent = agent_snapshot(AGENT_LOG, hours=hours)
+    st.subheader('État des sources')
+    st.caption('Prediction — SQLite technique 4B')
+    pred_ok = show_source(pred)
+    st.caption('Agent — SQLite technique 4C')
+    agent_ok = show_source(agent)
+    st.subheader('Prédictions / API')
+    st.caption('business est une origine déclarative, sans preuve de client réel. Les KPI principaux couvrent uniquement api_predict.')
+    if pred_ok and pred['kpis'] is not None:
+        metrics(pred['kpis'], [('total', 'Tentatives API'), ('success', 'Succès API'), ('validation_error', 'validation_error'),
+                ('internal_error', 'internal_error'), ('success_rate', 'Taux de succès API'), ('mean_ms', 'Latence moyenne API'), ('median_ms', 'Latence médiane API')])
+        st.caption('Taux : succès / tentatives API. Latences : toutes les tentatives API terminées, en millisecondes.')
+        st.metric('Préchauffages (hors KPI API)', str(pred['warmups']['total']))
+        daily_chart(pred['daily'])
+        if pred['models']:
+            st.dataframe(pd.DataFrame(pred['models']), hide_index=True)
+    st.subheader('Agent')
+    if agent_ok and agent['kpis'] is not None:
+        metrics(agent['kpis'], [('total', 'Exécutions'), ('success', 'Succès Agent'), ('error', 'Erreurs Agent'),
+                ('running', 'Non terminées'), ('success_rate', 'Taux de succès Agent'), ('mean_ms', 'Latence moyenne Agent'),
+                ('median_ms', 'Latence médiane Agent'), ('attempts', 'Tentatives Agent'),
+                ('retry_decided', 'Tentatives au statut retry'), ('retries_started', 'Retries effectivement démarrés')])
+        st.caption('Taux : succès / (succès + erreurs). Latences : exécutions terminales seulement. Retry démarré : attempt > 1 ; retry décidé : statut retry.')
+        daily_chart(agent['daily'])
+        if agent['models']:
+            st.dataframe(pd.DataFrame(agent['models']), hide_index=True)
+    st.subheader('Outils')
+    if agent_ok and agent['tools'] is not None:
+        metrics(agent['tools'], [('total', 'Outils démarrés'), ('terminal', 'Outils terminés'), ('error', 'Outils en erreur'),
+                                ('interrupted', 'interrupted'), ('running', 'Outils non terminés')])
+        st.caption('Terminés : success, error, no_result, unknown. Durées moyennes et médianes : ces mêmes appels terminés uniquement.')
+        if agent['tool_groups']:
+            frame = pd.DataFrame(agent['tool_groups'])
+            st.dataframe(frame, hide_index=True)
+            st.bar_chart(frame.set_index('tool_name')[['success', 'error', 'no_result', 'unknown', 'interrupted', 'running']])
+    st.subheader('Limites de mesure')
+    st.caption('Dates et regroupements en UTC ; fenêtre appliquée au début des appels, tentatives et outils indépendamment. running signifie sans terminaison observée, y compris après un arrêt brutal. Écritures best effort : couverture non exhaustive. Rétention de 30 jours côté producteurs ; cette page lit sans écrire ni purger. Aucun statut global des services ne peut être déduit.')
+    st.caption('rag_retrieve, search_web et build_report sont des appels techniques. build_report ne confirme aucun téléchargement. Aucun contenu métier ou LLM n’est affiché.')
     if st.button('Ouvrir les diagnostics explicites des services'):
         st.switch_page('app/health_check.py')
     if st.button('Ouvrir Administration'):
